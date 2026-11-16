@@ -8,6 +8,7 @@ try:
     import json
     import secrets
     from datetime import date, datetime, timedelta
+    from pathlib import Path
     import pandas as pd
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import IntegrityError
@@ -20,6 +21,56 @@ except Exception as e:
     st.stop()
 
 TITULO = "Auto Peças & Mecânica Aliança"
+LOGO = Path(__file__).resolve().parent / "logo_alianca.jpg"
+
+
+def mostrar_logo(largura: int = 180) -> None:
+    st.image(LOGO, width=largura, alt="Logo Auto Peças e Mecânica Aliança")
+
+
+def estilo_login() -> None:
+    st.html(
+        """
+        <style>
+        .stApp,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stHeader"],
+        [data-testid="stBottom"] {
+          background: #021524;
+        }
+        [data-testid="stHeader"] { background: #021524; }
+        [data-testid="stDecoration"] { display: none; }
+        [data-testid="stMain"] h1,
+        [data-testid="stMain"] h2,
+        [data-testid="stMain"] h3 {
+          color: #f7fbff;
+          text-align: center;
+        }
+        [data-testid="stMain"] [data-testid="stCaptionContainer"],
+        [data-testid="stMain"] [data-testid="stCaptionContainer"] p {
+          color: #d5e4ee;
+          text-align: center;
+        }
+        [data-testid="stMain"] [data-testid="stImage"] {
+          display: flex;
+          justify-content: center;
+        }
+        [data-testid="stMain"] [data-testid="stWidgetLabel"] p,
+        [data-testid="stMain"] label {
+          color: #f7fbff;
+        }
+        [data-testid="stMain"] input {
+          background: #f4f8fb;
+          color: #021524;
+          border: 1px solid #7ad7f0;
+          caret-color: #021524;
+        }
+        [data-testid="stMain"] [data-testid="stForm"] {
+          border-color: #1d4d66;
+        }
+        </style>
+        """
+    )
 
 ABA_GERAL = "Visão geral"
 ABA_OS = "Ordens de Serviço"
@@ -2251,6 +2302,14 @@ def garantir_usuarios() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE painel_usuario
+                ADD COLUMN IF NOT EXISTS trocar_senha boolean NOT NULL DEFAULT false
+                """
+            )
+        )
 
 
 def contar_usuarios() -> int:
@@ -2264,7 +2323,7 @@ def autenticar(login: str, senha: str) -> tuple[dict | None, str | None]:
         linha = conn.execute(
             text(
                 """
-                SELECT id, nome, login, senha_salt, senha_hash, administrador, ativo
+                SELECT id, nome, login, senha_salt, senha_hash, administrador, ativo, trocar_senha
                 FROM painel_usuario
                 WHERE lower(login) = lower(:login)
                 """
@@ -2280,6 +2339,7 @@ def autenticar(login: str, senha: str) -> tuple[dict | None, str | None]:
         "nome": linha["nome"],
         "login": linha["login"],
         "administrador": bool(linha["administrador"]),
+        "trocar_senha": bool(linha["trocar_senha"]),
     }, None
 
 
@@ -2288,7 +2348,7 @@ def usuario_sessao(usuario_id: int) -> dict | None:
         linha = conn.execute(
             text(
                 """
-                SELECT id, nome, login, administrador, ativo
+                SELECT id, nome, login, administrador, ativo, trocar_senha
                 FROM painel_usuario
                 WHERE id = :id
                 """
@@ -2302,10 +2362,17 @@ def usuario_sessao(usuario_id: int) -> dict | None:
         "nome": linha["nome"],
         "login": linha["login"],
         "administrador": bool(linha["administrador"]),
+        "trocar_senha": bool(linha["trocar_senha"]),
     }
 
 
-def criar_usuario(nome: str, login: str, senha: str, administrador: bool) -> str | None:
+def criar_usuario(
+    nome: str,
+    login: str,
+    senha: str,
+    administrador: bool,
+    exigir_troca: bool = True,
+) -> str | None:
     nome = nome.strip()
     login = login.strip()
     if not nome:
@@ -2320,9 +2387,9 @@ def criar_usuario(nome: str, login: str, senha: str, administrador: bool) -> str
                 text(
                     """
                     INSERT INTO painel_usuario
-                        (nome, login, senha_salt, senha_hash, administrador)
+                        (nome, login, senha_salt, senha_hash, administrador, trocar_senha)
                     VALUES
-                        (:nome, :login, :salt, :digest, :administrador)
+                        (:nome, :login, :salt, :digest, :administrador, :trocar_senha)
                     """
                 ),
                 {
@@ -2331,6 +2398,7 @@ def criar_usuario(nome: str, login: str, senha: str, administrador: bool) -> str
                     "salt": salt,
                     "digest": digest,
                     "administrador": administrador,
+                    "trocar_senha": exigir_troca,
                 },
             )
     except IntegrityError:
@@ -2343,13 +2411,16 @@ def listar_usuarios() -> pd.DataFrame:
         linhas = conn.execute(
             text(
                 """
-                SELECT id, nome, login, administrador, ativo
+                SELECT id, nome, login, administrador, ativo, trocar_senha
                 FROM painel_usuario
                 ORDER BY nome, login
                 """
             )
         ).mappings().all()
-    return pd.DataFrame(linhas, columns=["id", "nome", "login", "administrador", "ativo"])
+    return pd.DataFrame(
+        linhas,
+        columns=["id", "nome", "login", "administrador", "ativo", "trocar_senha"],
+    )
 
 
 def admins_ativos(exceto_id: int | None = None) -> int:
@@ -2374,7 +2445,7 @@ def definir_ativo(usuario_id: int, ativo: bool) -> str | None:
     return None
 
 
-def definir_senha(usuario_id: int, senha: str) -> str | None:
+def definir_senha(usuario_id: int, senha: str, exigir_troca: bool) -> str | None:
     erro = _erro_senha(senha)
     if erro:
         return erro
@@ -2384,18 +2455,32 @@ def definir_senha(usuario_id: int, senha: str) -> str | None:
             text(
                 """
                 UPDATE painel_usuario
-                SET senha_salt = :salt, senha_hash = :digest
+                SET senha_salt = :salt, senha_hash = :digest, trocar_senha = :trocar_senha
                 WHERE id = :id
                 """
             ),
-            {"salt": salt, "digest": digest, "id": usuario_id},
+            {"salt": salt, "digest": digest, "trocar_senha": exigir_troca, "id": usuario_id},
         )
     return None
 
 
+def senha_confere_id(usuario_id: int, senha: str) -> bool:
+    with engine().connect() as conn:
+        linha = conn.execute(
+            text("SELECT senha_salt, senha_hash FROM painel_usuario WHERE id = :id"),
+            {"id": usuario_id},
+        ).mappings().first()
+    if linha is None:
+        return False
+    return _senha_confere(senha, linha["senha_salt"], linha["senha_hash"])
+
+
 def tela_acesso() -> None:
+    estilo_login()
     _, centro, _ = st.columns([1, 1.2, 1])
     with centro:
+        with st.container(horizontal_alignment="center", key="logo_acesso"):
+            mostrar_logo(220)
         st.title(TITULO)
         if contar_usuarios() == 0:
             st.subheader("Criar o administrador")
@@ -2410,7 +2495,7 @@ def tela_acesso() -> None:
                 if senha != confirma:
                     st.error("As senhas não são iguais.")
                     return
-                erro = criar_usuario(nome, login, senha, True)
+                erro = criar_usuario(nome, login, senha, True, exigir_troca=False)
                 if erro:
                     st.error(erro)
                     return
@@ -2432,6 +2517,43 @@ def tela_acesso() -> None:
             st.rerun()
 
 
+def tela_trocar_senha() -> None:
+    estilo_login()
+    usuario = st.session_state.usuario
+    _, centro, _ = st.columns([1, 1.2, 1])
+    with centro:
+        with st.container(horizontal_alignment="center", key="logo_troca"):
+            mostrar_logo(220)
+        st.title(TITULO)
+        st.subheader("Troque sua senha")
+        st.caption("A senha recebida serve só para entrar a primeira vez.")
+        with st.form("troca_obrigatoria"):
+            atual = st.text_input("Senha atual", type="password")
+            nova = st.text_input("Nova senha", type="password")
+            confirma = st.text_input("Confirmar nova senha", type="password")
+            salvar = st.form_submit_button("Salvar nova senha", type="primary", width="stretch")
+        if st.button("Sair", key="sair_troca", width="stretch"):
+            st.session_state.pop("usuario", None)
+            st.rerun()
+        if not salvar:
+            return
+        if not senha_confere_id(int(usuario["id"]), atual):
+            st.error("A senha atual está incorreta.")
+            return
+        if nova != confirma:
+            st.error("As senhas novas não são iguais.")
+            return
+        if nova == atual:
+            st.error("Escolha uma senha diferente da que você recebeu.")
+            return
+        erro = definir_senha(int(usuario["id"]), nova, exigir_troca=False)
+        if erro:
+            st.error(erro)
+            return
+        st.session_state.usuario = usuario_sessao(int(usuario["id"]))
+        st.rerun()
+
+
 def aba_usuarios() -> None:
     if not st.session_state.usuario["administrador"]:
         st.session_state.aba = ABA_GERAL
@@ -2439,6 +2561,7 @@ def aba_usuarios() -> None:
     st.subheader("Usuários")
     with st.container(border=True):
         st.markdown("Novo usuário")
+        st.caption("A senha cadastrada vale só para o primeiro acesso. A pessoa terá que trocá-la ao entrar.")
         with st.form("novo_usuario", clear_on_submit=True):
             nome = st.text_input("Nome", key="novo_nome")
             login = st.text_input("Login", key="novo_login")
@@ -2458,6 +2581,7 @@ def aba_usuarios() -> None:
             "login": "Login",
             "administrador": "Administrador",
             "ativo": "Ativo",
+            "trocar_senha": "Troca pendente",
         }
     )
     st.dataframe(visivel, hide_index=True, width="stretch", alt="Usuários cadastrados no painel")
@@ -2482,18 +2606,27 @@ def aba_usuarios() -> None:
             else:
                 st.rerun()
     with st.form(f"trocar_senha_{int(linha['id'])}"):
+        st.caption("Se a pessoa esqueceu a senha, defina outra. No próximo acesso ela terá que trocá-la.")
         nova = st.text_input("Nova senha", type="password")
-        salvar = st.form_submit_button("Salvar senha")
+        salvar = st.form_submit_button("Redefinir senha")
     if salvar:
-        erro = definir_senha(int(linha["id"]), nova)
+        propria = int(linha["id"]) == eu
+        erro = definir_senha(int(linha["id"]), nova, exigir_troca=not propria)
         if erro:
             st.error(erro)
-        else:
+        elif propria:
+            st.session_state.usuario = usuario_sessao(eu)
             st.success("Senha atualizada.")
+        else:
+            st.success("Senha redefinida. No próximo acesso a pessoa precisará trocá-la.")
 
 
 def main() -> None:
-    st.set_page_config(page_title=TITULO, page_icon=":wrench:", layout="wide")
+    st.set_page_config(
+        page_title=TITULO,
+        page_icon=str(LOGO),
+        layout="wide",
+    )
     try:
         with engine().connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -2511,8 +2644,13 @@ def main() -> None:
     if "usuario" not in st.session_state:
         tela_acesso()
         return
+    if st.session_state.usuario.get("trocar_senha"):
+        tela_trocar_senha()
+        return
     usuario = st.session_state.usuario
-    titulo, sair = st.columns([6, 1], vertical_alignment="center")
+    logo, titulo, sair = st.columns([1, 5, 1], vertical_alignment="center")
+    with logo:
+        mostrar_logo(92)
     with titulo:
         st.title(TITULO)
         st.caption("Histórico no Supabase")
@@ -2536,6 +2674,7 @@ def main() -> None:
     st.session_state.setdefault("cli_os_aberta", None)
 
     with st.sidebar:
+        mostrar_logo(150)
         st.header(TITULO)
         st.write(usuario["nome"])
         if usuario["administrador"]:

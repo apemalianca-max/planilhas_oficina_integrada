@@ -3,6 +3,7 @@
 !/.gitignore
 !/requirements.txt
 !/app.py
+!/logo_alianca.jpg
 !/migrar_para_supabase.py
 !/.streamlit/
 /.streamlit/secrets.toml
