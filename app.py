@@ -9,6 +9,7 @@ try:
     import secrets
     from datetime import date, datetime, timedelta
     from pathlib import Path
+    from urllib.parse import urlsplit
     import pandas as pd
     from sqlalchemy import create_engine, text
     from sqlalchemy.exc import IntegrityError
@@ -2418,6 +2419,53 @@ def garantir_usuarios() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE painel_log
+                ADD COLUMN IF NOT EXISTS origem text
+                """
+            )
+        )
+
+
+def _host_local(host: str) -> bool:
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+        return True
+    partes = host.split(".")
+    if len(partes) == 4 and all(parte.isdigit() for parte in partes):
+        primeiro, segundo = int(partes[0]), int(partes[1])
+        if primeiro == 10 or (primeiro == 192 and segundo == 168):
+            return True
+        if primeiro == 172 and 16 <= segundo <= 31:
+            return True
+    return False
+
+
+def origem_acesso() -> str:
+    url = st.context.url or ""
+    host = (urlsplit(url).hostname or "").lower() if url else ""
+    if not host:
+        bruto = ""
+        try:
+            bruto = st.context.headers.get("host") or ""
+        except Exception:
+            bruto = ""
+        host = bruto.split(":")[0].strip().lower()
+    if _host_local(host):
+        return "Local"
+    if not host:
+        return "Não informado"
+    return "Público"
+
+
+def texto_link_acesso() -> str:
+    origem = origem_acesso()
+    if origem == "Local":
+        return "pelo link local"
+    if origem == "Público":
+        return "pelo link público"
+    return "por um link não identificado"
 
 
 def registrar_log(
@@ -2438,11 +2486,14 @@ def registrar_log(
         "usuario_login": (usuario.get("login") or login_informado or "").strip() or None,
         "acao": acao,
         "detalhe": detalhe,
+        "origem": origem_acesso(),
     }
     sql = text(
         """
-        INSERT INTO painel_log (usuario_id, usuario_nome, usuario_login, acao, detalhe)
-        VALUES (:usuario_id, :usuario_nome, :usuario_login, :acao, :detalhe)
+        INSERT INTO painel_log
+            (usuario_id, usuario_nome, usuario_login, acao, detalhe, origem)
+        VALUES
+            (:usuario_id, :usuario_nome, :usuario_login, :acao, :detalhe, :origem)
         """
     )
     if conn is not None:
@@ -2453,7 +2504,7 @@ def registrar_log(
 
 
 def listar_log(limite: int = 400) -> pd.DataFrame:
-    colunas = ["quando", "usuario", "login", "acao", "detalhe"]
+    colunas = ["quando", "usuario", "login", "acao", "origem", "detalhe"]
     with engine().connect() as conn:
         linhas = conn.execute(
             text(
@@ -2462,6 +2513,7 @@ def listar_log(limite: int = 400) -> pd.DataFrame:
                        COALESCE(usuario_nome, '') AS usuario,
                        COALESCE(usuario_login, '') AS login,
                        acao,
+                       COALESCE(NULLIF(origem, ''), 'Não informado') AS origem,
                        detalhe
                 FROM painel_log
                 ORDER BY id DESC
@@ -2479,7 +2531,7 @@ def listar_log(limite: int = 400) -> pd.DataFrame:
 def encerrar_sessao() -> None:
     usuario = st.session_state.get("usuario")
     if usuario:
-        registrar_log("Saída", "Saiu do painel.", usuario=usuario)
+        registrar_log("Saída", f"Saiu do painel {texto_link_acesso()}.", usuario=usuario)
     st.session_state.pop("usuario", None)
     st.rerun()
 
@@ -2680,7 +2732,7 @@ def tela_acesso() -> None:
                     "Criou a primeira conta de administrador.",
                     usuario=usuario,
                 )
-                registrar_log("Acesso", "Entrou no painel.", usuario=usuario)
+                registrar_log("Acesso", f"Entrou no painel {texto_link_acesso()}.", usuario=usuario)
                 st.session_state.usuario = usuario
                 st.rerun()
             return
@@ -2695,12 +2747,12 @@ def tela_acesso() -> None:
                 motivo = erro or "Login ou senha incorretos."
                 registrar_log(
                     "Acesso",
-                    f"Tentativa de acesso recusada: {motivo}",
+                    f"Tentativa de acesso recusada {texto_link_acesso()}: {motivo}",
                     login_informado=login.strip(),
                 )
                 st.error(motivo)
                 return
-            registrar_log("Acesso", "Entrou no painel.", usuario=usuario)
+            registrar_log("Acesso", f"Entrou no painel {texto_link_acesso()}.", usuario=usuario)
             st.session_state.usuario = usuario
             st.rerun()
 
@@ -2856,7 +2908,7 @@ def aba_log() -> None:
     termo = texto.strip()
     if termo:
         mascara = pd.Series(False, index=visivel.index)
-        for coluna in ("usuario", "login", "acao", "detalhe"):
+        for coluna in ("usuario", "login", "acao", "origem", "detalhe"):
             mascara = mascara | visivel[coluna].astype(str).str.contains(termo, case=False, na=False, regex=False)
         visivel = visivel[mascara]
     if visivel.empty:
@@ -2869,6 +2921,7 @@ def aba_log() -> None:
             "usuario": "Usuário",
             "login": "Login",
             "acao": "Ação",
+            "origem": "Origem",
             "detalhe": "Detalhe",
         }
     )
@@ -2884,12 +2937,59 @@ def aba_log() -> None:
     )
 
 
+def esconder_gerenciar() -> None:
+    st.html(
+        """
+        <style>
+        [data-testid="stToolbar"],
+        [data-testid="stAppDeployButton"],
+        [data-testid="stMainMenu"] { display: none !important; }
+        </style>
+        <script>
+        (function () {
+          if (window.__esconderGerenciar) window.__esconderGerenciar.disconnect();
+          const texto = /^\\s*[<‹]?\\s*(gerenciar aplicativo|manage app)\\s*$/i;
+          function documentos() {
+            const lista = [document];
+            try {
+              if (window.parent && window.parent.document && window.parent.document !== document) {
+                lista.push(window.parent.document);
+              }
+            } catch (erro) {}
+            return lista;
+          }
+          function esconder() {
+            documentos().forEach((doc) => {
+              doc.querySelectorAll("button, a, div, span").forEach((el) => {
+                const conteudo = (el.innerText || "").trim();
+                if (!texto.test(conteudo)) return;
+                const alvo = el.closest("button, a") || el;
+                alvo.style.setProperty("display", "none", "important");
+                if (alvo.parentElement && (alvo.parentElement.innerText || "").trim().length < 40) {
+                  alvo.parentElement.style.setProperty("display", "none", "important");
+                }
+              });
+            });
+          }
+          esconder();
+          setTimeout(esconder, 400);
+          setTimeout(esconder, 1500);
+          window.__esconderGerenciar = new MutationObserver(esconder);
+          window.__esconderGerenciar.observe(document.body, {childList: true, subtree: true, characterData: true});
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
 def main() -> None:
     st.set_page_config(
         page_title=TITULO,
         page_icon=str(LOGO),
         layout="wide",
     )
+    esconder_gerenciar()
     try:
         with engine().connect() as conn:
             conn.execute(text("SELECT 1"))
