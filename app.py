@@ -81,6 +81,15 @@ ABA_NF = "Notas Fiscais (NFS-e)"
 ABA_USUARIOS = "Usuários"
 ABA_LOG = "Log"
 ABAS = [ABA_GERAL, ABA_OS, ABA_FIN, ABA_CLI, ABA_NF]
+CHAVES_MENU = {
+    ABA_GERAL: "nav_visao",
+    ABA_OS: "nav_os",
+    ABA_FIN: "nav_financeiro",
+    ABA_CLI: "nav_clientes",
+    ABA_NF: "nav_notas",
+    ABA_USUARIOS: "nav_usuarios",
+    ABA_LOG: "nav_log",
+}
 
 OS_RESUMO_COLS = [
     "id_os",
@@ -611,7 +620,6 @@ def mostrar_lembrete_baixa() -> None:
 
 
 def visao_geral() -> None:
-    st.header(TITULO)
     mostrar_lembrete_baixa()
     if st.button("Pesquisar histórico", type="primary", key="abrir_historico"):
         st.session_state.historico_aberto = True
@@ -2983,6 +2991,64 @@ def esconder_gerenciar() -> None:
     )
 
 
+def menu_principal(abas: list[str]) -> None:
+    ativa = st.session_state.aba
+    chave_ativa = CHAVES_MENU[ativa]
+    st.html(
+        f"""
+        <style>
+        [data-testid="stMain"] h1 {{
+          text-align: center;
+          margin-bottom: 0.15rem;
+        }}
+        .st-key-menu_navegacao,
+        .st-key-menu_navegacao [data-testid="stHorizontalBlock"] {{
+          width: 100%;
+          justify-content: center !important;
+        }}
+        .st-key-menu_navegacao {{
+          position: sticky;
+          top: 0.45rem;
+          z-index: 999;
+          padding: 0.15rem 0 0.55rem;
+        }}
+        .st-key-menu_navegacao button {{
+          background-color: #0c6b4d !important;
+          color: #f4fbf7 !important;
+          border: 1px solid #084a36 !important;
+          border-radius: 999px !important;
+          box-shadow: 0 8px 18px rgba(12, 107, 77, 0.34) !important;
+          font-weight: 600 !important;
+          padding: 0.45rem 0.95rem !important;
+        }}
+        .st-key-menu_navegacao button:hover {{
+          background-color: #14845f !important;
+          transform: translateY(-2px);
+        }}
+        .st-key-menu_navegacao .st-key-{chave_ativa} button,
+        .st-key-menu_navegacao .st-key-{chave_ativa} button:hover {{
+          background-color: #c4a35a !important;
+          color: #1a2e28 !important;
+          border-color: #a8883e !important;
+          box-shadow: 0 10px 22px rgba(196, 163, 90, 0.45) !important;
+        }}
+        </style>
+        """
+    )
+    with st.container(
+        key="menu_navegacao",
+        horizontal=True,
+        horizontal_alignment="center",
+        vertical_alignment="center",
+        gap="small",
+    ):
+        for nome in abas:
+            if st.button(nome, key=CHAVES_MENU[nome], type="primary"):
+                if nome != ativa:
+                    st.session_state.aba = nome
+                    st.rerun()
+
+
 def main() -> None:
     st.set_page_config(
         page_title=TITULO,
@@ -3011,12 +3077,11 @@ def main() -> None:
         tela_trocar_senha()
         return
     usuario = st.session_state.usuario
-    logo, titulo, sair = st.columns([1, 5, 1], vertical_alignment="center")
+    logo, titulo, sair = st.columns([1, 4, 1], vertical_alignment="center")
     with logo:
         mostrar_logo(92)
     with titulo:
         st.title(TITULO)
-        st.caption("Histórico no Supabase")
     with sair:
         if st.button("Sair", width="stretch", key="sair_topo"):
             encerrar_sessao()
@@ -3057,14 +3122,8 @@ def main() -> None:
         abas.append(ABA_LOG)
     if st.session_state.get("aba") not in abas:
         st.session_state.aba = ABA_GERAL
-    aba = st.segmented_control(
-        "Seções",
-        abas,
-        key="aba",
-        required=True,
-        label_visibility="collapsed",
-        width="stretch",
-    )
+    menu_principal(abas)
+    aba = st.session_state.aba
     if aba == ABA_OS:
         aba_os()
     elif aba == ABA_FIN:
