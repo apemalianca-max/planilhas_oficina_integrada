@@ -7,6 +7,7 @@ try:
     import html
     import json
     import secrets
+    import uuid
     from datetime import date, datetime, timedelta
     from pathlib import Path
     from urllib.parse import urlsplit
@@ -22,6 +23,11 @@ except Exception as e:
     st.stop()
 
 TITULO = "Auto Peças & Mecânica Aliança"
+CNPJ_NUMERO = "29027383000173"
+ENDERECO_EMPRESA = "Rua Carajás, Qd. 54, Lt. 01, S/N, Centro"
+TELEFONE_NUMERO = "6136122894"
+MULTA_MORATORIA = 0.02
+JUROS_MORA_MES = 0.01
 LOGO = Path(__file__).resolve().parent / "logo_alianca.jpg"
 
 
@@ -1714,6 +1720,642 @@ def mesmo_conjunto(rascunho, banco: pd.DataFrame) -> bool:
     return set(rascunho["id"].astype(int)) == set(banco["id"].astype(int))
 
 
+def documento_empresa(numero: str) -> str:
+    digitos = "".join(caractere for caractere in numero if caractere.isdigit())
+    if len(digitos) != 14:
+        return numero
+    return f"{digitos[:2]}.{digitos[2:5]}.{digitos[5:8]}/{digitos[8:12]}-{digitos[12:]}"
+
+
+def telefone_empresa(numero: str) -> str:
+    digitos = "".join(caractere for caractere in numero if caractere.isdigit())
+    if len(digitos) == 10:
+        return f"({digitos[:2]}) {digitos[2:6]}-{digitos[6:]}"
+    if len(digitos) == 11:
+        return f"({digitos[:2]}) {digitos[2:7]}-{digitos[7:]}"
+    return numero
+
+
+def _grupo_extenso(numero: int) -> str:
+    unidades = (
+        "zero", "um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove",
+        "dez", "onze", "doze", "treze", "quatorze", "quinze", "dezesseis", "dezessete",
+        "dezoito", "dezenove",
+    )
+    dezenas = ("", "", "vinte", "trinta", "quarenta", "cinquenta", "sessenta", "setenta", "oitenta", "noventa")
+    centenas = (
+        "", "cento", "duzentos", "trezentos", "quatrocentos", "quinhentos",
+        "seiscentos", "setecentos", "oitocentos", "novecentos",
+    )
+    if numero == 100:
+        return "cem"
+    centena, resto = divmod(numero, 100)
+    partes: list[str] = []
+    if centena:
+        partes.append(centenas[centena])
+    if resto:
+        if resto < 20:
+            partes.append(unidades[resto])
+        else:
+            dezena, unidade = divmod(resto, 10)
+            partes.append(dezenas[dezena] + (f" e {unidades[unidade]}" if unidade else ""))
+    return " e ".join(partes)
+
+
+def _inteiro_extenso(numero: int) -> str:
+    if numero == 0:
+        return "zero"
+    escalas = ((10**9, "bilhão", "bilhões"), (10**6, "milhão", "milhões"), (10**3, "mil", "mil"))
+    partes: list[str] = []
+    resto = numero
+    for tamanho, singular, plural in escalas:
+        quantidade, resto = divmod(resto, tamanho)
+        if not quantidade:
+            continue
+        if tamanho == 1000 and quantidade == 1:
+            partes.append("mil")
+        else:
+            nome = singular if quantidade == 1 else plural
+            partes.append(f"{_grupo_extenso(quantidade)} {nome}")
+    if resto:
+        partes.append(_grupo_extenso(resto))
+    return " e ".join(partes)
+
+
+def reais_por_extenso(valor: float) -> str:
+    centavos_totais = int(round(abs(float(valor)) * 100))
+    reais, centavos = divmod(centavos_totais, 100)
+
+    def moeda(quantidade: int, singular: str, plural: str) -> str:
+        if quantidade <= 0:
+            return ""
+        return f"{_inteiro_extenso(quantidade)} {singular if quantidade == 1 else plural}"
+
+    texto_reais = moeda(reais, "real", "reais")
+    texto_centavos = moeda(centavos, "centavo", "centavos")
+    if texto_reais and texto_centavos:
+        return f"{texto_reais} e {texto_centavos}"
+    return texto_reais or texto_centavos or "zero real"
+
+
+def encargos_legais(saldo: float, dias: int | None) -> tuple[float, float]:
+    if saldo <= 0 or not dias or dias <= 0:
+        return 0.0, 0.0
+    multa = round(saldo * MULTA_MORATORIA, 2)
+    juros = round(saldo * JUROS_MORA_MES * (dias / 30), 2)
+    return juros, multa
+
+
+def separar_obs_encargos(obs: str) -> tuple[str, float | None, float | None]:
+    marca = "[[encargos "
+    if marca not in obs:
+        return obs.strip(), None, None
+    limpo, _, resto = obs.partition(marca)
+    miolo = resto.split("]]", 1)[0]
+    juros = multa = None
+    for parte in miolo.split():
+        if "=" not in parte:
+            continue
+        chave, texto = parte.split("=", 1)
+        try:
+            numero = round(float(texto), 2)
+        except ValueError:
+            continue
+        if chave == "juros":
+            juros = numero
+        elif chave == "multa":
+            multa = numero
+    return limpo.strip(), juros, multa
+
+
+def obs_com_encargos(obs: str, juros: float, multa: float, gravar_marca: bool) -> str | None:
+    limpo, _, _ = separar_obs_encargos(obs)
+    if gravar_marca:
+        limpo = f"{limpo}\n[[encargos juros={juros:.2f} multa={multa:.2f}]]".strip()
+    return limpo or None
+
+
+def garantir_encargos() -> bool:
+    if "fin_tem_encargos" in st.session_state:
+        return bool(st.session_state.fin_tem_encargos)
+    try:
+        with engine().begin() as conn:
+            conn.execute(text("ALTER TABLE oficina_financeiro ADD COLUMN IF NOT EXISTS juros double precision"))
+            conn.execute(text("ALTER TABLE oficina_financeiro ADD COLUMN IF NOT EXISTS multa double precision"))
+        st.session_state.fin_tem_encargos = True
+    except Exception:
+        st.session_state.fin_tem_encargos = False
+    return bool(st.session_state.fin_tem_encargos)
+
+
+def buscar_conta(conta_id: int) -> pd.Series | None:
+    extra = ", juros, multa" if garantir_encargos() else ""
+    frame = query(
+        f"""
+        SELECT id, os, nome, quitado, vencimento, valor, valor_pago, dt_pagamento,
+               obs_conta, forma_pagamento, parcela, descricao, desconto,
+               data_lancamento, emissao, departamento, documento, conta, tipo
+               {extra}
+        FROM oficina_financeiro
+        WHERE id = ?
+        """,
+        (int(conta_id),),
+    )
+    if frame.empty:
+        return None
+    return frame.iloc[0]
+
+
+def _encargos_salvos(linha: pd.Series) -> tuple[float, float, bool]:
+    if "juros" in linha.index and (pd.notna(linha["juros"]) or pd.notna(linha["multa"])):
+        return valor_banco(linha["juros"]), valor_banco(linha["multa"]), True
+    _, juros, multa = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    if juros is None and multa is None:
+        return 0.0, 0.0, False
+    return valor_banco(juros), valor_banco(multa), True
+
+
+def abrir_os_da_conta(numero: int, origem: str) -> None:
+    st.session_state.fin_baixa_id = None
+    st.session_state.fin_os_perguntar = int(numero)
+    st.session_state.fin_os_aberta = None
+    st.session_state.fin_origem = origem
+
+
+def abrir_baixa(conta_id: int, reabrir: bool = False) -> None:
+    st.session_state.fin_os_perguntar = None
+    st.session_state.fin_os_aberta = None
+    st.session_state.fin_baixa_id = int(conta_id)
+    st.session_state.fin_baixa_reabrir = bool(reabrir)
+    st.session_state.fin_baixa_init = None
+
+
+def fechar_baixa() -> None:
+    st.session_state.fin_baixa_id = None
+    st.session_state.fin_baixa_reabrir = False
+
+
+def _sync_data_pagamento(conta_id: int) -> None:
+    pago = valor_banco(st.session_state.get(f"bx_pago_{conta_id}"))
+    if pago > 0 and st.session_state.get(f"bx_data_{conta_id}") is None:
+        st.session_state[f"bx_data_{conta_id}"] = date.today()
+
+
+def _recalcular_encargos(conta_id: int, saldo: float, dias: int | None) -> None:
+    juros, multa = encargos_legais(saldo, dias)
+    st.session_state[f"bx_juros_{conta_id}"] = juros
+    st.session_state[f"bx_multa_{conta_id}"] = multa
+
+
+def valor_divida_exibida(valor, pago, juros=0, multa=0) -> float:
+    principal = valor_banco(valor)
+    recebido = valor_banco(pago)
+    acrescimo = valor_banco(juros) + valor_banco(multa)
+    if acrescimo > 0:
+        return round(max(0.0, principal + acrescimo - recebido), 2)
+    return round(max(0.0, principal - recebido), 2)
+
+
+def gravar_conta_baixa(
+    conta_id: int,
+    *,
+    pago: float,
+    juros: float,
+    multa: float,
+    quando: date | None,
+    obs: str,
+    quitar: bool,
+) -> None:
+    tem_colunas = garantir_encargos()
+    pagamento = None if quando is None else quando.isoformat()
+    quitado = "Sim" if quitar else "Nao"
+    obs_banco = obs_com_encargos(obs, juros, multa, gravar_marca=not tem_colunas)
+    with engine().begin() as conn:
+        colunas = "valor_pago, quitado, dt_pagamento, obs_conta, os, nome"
+        if tem_colunas:
+            colunas += ", juros, multa"
+        antes = conn.execute(
+            text(f"SELECT {colunas} FROM oficina_financeiro WHERE id = :id"),
+            {"id": int(conta_id)},
+        ).mappings().first()
+        if antes is None:
+            return
+        campos = """
+            quitado = :quitado,
+            dt_pagamento = :pagamento,
+            valor_pago = :pago,
+            obs_conta = :obs
+        """
+        params = {
+            "quitado": quitado,
+            "pagamento": pagamento,
+            "pago": round(pago, 2),
+            "obs": obs_banco,
+            "id": int(conta_id),
+        }
+        if tem_colunas:
+            campos += ", juros = :juros, multa = :multa"
+            params["juros"] = round(juros, 2)
+            params["multa"] = round(multa, 2)
+        conn.execute(
+            text(f"UPDATE oficina_financeiro SET {campos} WHERE id = :id"),
+            params,
+        )
+        os_num = texto_banco(antes["os"]) or "sem número"
+        cliente = texto_banco(antes["nome"]) or "sem cliente"
+        situacao = "quitada" if quitar else "parcial"
+        registrar_log(
+            "Baixa",
+            (
+                f"OS {os_num}, {cliente}, conta {int(conta_id)}: baixa {situacao}, "
+                f"valor pago {brl(pago)}, juros {brl(juros)}, multa {brl(multa)}, "
+                f"pagamento em {data_br(pagamento) or 'sem data'}."
+            ),
+            conn=conn,
+        )
+
+
+def _estilo_documento() -> str:
+    return """
+    body { font-family: Georgia, "Times New Roman", serif; color: #1c2430; margin: 28px; }
+    header { border-bottom: 2px solid #145c45; padding-bottom: 12px; margin-bottom: 18px; }
+    h1 { font-family: Arial, sans-serif; font-size: 20px; margin: 0; letter-spacing: 0.04em; }
+    h2 { font-family: Arial, sans-serif; font-size: 16px; margin: 4px 0 0; color: #145c45; }
+    .empresa { margin: 4px 0 0; font-family: Arial, sans-serif; font-size: 12px; color: #3d4a42; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { border: 1px solid #c5d7ce; padding: 7px 8px; font-size: 13px; text-align: left; vertical-align: top; }
+    th { width: 34%; background: #f4fbf7; font-family: Arial, sans-serif; }
+    .texto { font-size: 14px; line-height: 1.45; text-align: justify; }
+    .carimbo { margin-top: 16px; font-family: Arial, sans-serif; font-weight: 700; color: #145c45; }
+    .assinatura { margin-top: 56px; width: 280px; border-top: 1px solid #1c2430; padding-top: 6px;
+                  font-family: Arial, sans-serif; font-size: 12px; }
+    """
+
+
+def _cabecalho_documento(titulo_doc: str) -> str:
+    cnpj = html.escape(documento_empresa(CNPJ_NUMERO))
+    endereco = html.escape(ENDERECO_EMPRESA)
+    telefone = html.escape(telefone_empresa(TELEFONE_NUMERO))
+    nome = html.escape(TITULO.upper())
+    return f"""
+    <header>
+      <h1>{nome}</h1>
+      <p class="empresa">CNPJ {cnpj}<br>{endereco}<br>Telefone {telefone}</p>
+      <h2>{html.escape(titulo_doc)}</h2>
+    </header>
+    """
+
+
+def _linha_doc(rotulo: str, valor: str) -> str:
+    return f"<tr><th>{html.escape(rotulo)}</th><td>{html.escape(valor or '—')}</td></tr>"
+
+
+def html_recibo(dados: dict) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Recibo — {html.escape(TITULO)}</title>
+<style>{_estilo_documento()}</style>
+</head>
+<body>
+{_cabecalho_documento("RECIBO DE QUITAÇÃO")}
+<p class="texto">
+Recebemos de <strong>{html.escape(dados["cliente"])}</strong> a importância de
+<strong>{html.escape(dados["valor_pago"])}</strong>
+({html.escape(dados["extenso"])}),
+referente a {html.escape(dados["descricao"])}, OS nº {html.escape(dados["os"])},
+dando plena, rasa e irrevogável quitação do débito abaixo.
+</p>
+<table>
+{_linha_doc("Recibo nº", dados["numero"])}
+{_linha_doc("Cliente", dados["cliente"])}
+{_linha_doc("Nº OS", dados["os"])}
+{_linha_doc("Descrição", dados["descricao"])}
+{_linha_doc("Parcela", dados["parcela"])}
+{_linha_doc("Vencimento", dados["vencimento"])}
+{_linha_doc("Valor da dívida", dados["divida"])}
+{_linha_doc("Juros", dados["juros"])}
+{_linha_doc("Multa", dados["multa"])}
+{_linha_doc("Valor pago", dados["valor_pago"])}
+{_linha_doc("Data do pagamento", dados["pagamento"])}
+{_linha_doc("Obs", dados["obs"])}
+</table>
+<p class="carimbo">QUITADO</p>
+<p class="texto">{html.escape(ENDERECO_EMPRESA)}, {html.escape(dados["pagamento"])}.</p>
+<div class="assinatura">{html.escape(TITULO)}<br>CNPJ {html.escape(documento_empresa(CNPJ_NUMERO))}</div>
+</body>
+</html>"""
+
+
+def html_promissoria(dados: dict) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Nota promissória — {html.escape(TITULO)}</title>
+<style>{_estilo_documento()}</style>
+</head>
+<body>
+{_cabecalho_documento("NOTA PROMISSÓRIA")}
+<table>
+{_linha_doc("Nº", dados["numero"])}
+{_linha_doc("Valor", dados["valor"])}
+{_linha_doc("Vencimento", dados["vencimento"])}
+{_linha_doc("Nº OS", dados["os"])}
+{_linha_doc("Praça de pagamento", ENDERECO_EMPRESA)}
+</table>
+<p class="texto">
+Pagarei até {html.escape(dados["vencimento"])}, por esta única via de nota promissória, a
+<strong>{html.escape(TITULO.upper())}</strong>, CNPJ {html.escape(documento_empresa(CNPJ_NUMERO))},
+ou à sua ordem, a quantia de <strong>{html.escape(dados["valor"])}</strong>
+({html.escape(dados["extenso"])}), em moeda corrente nacional, referente a
+{html.escape(dados["descricao"])}, OS nº {html.escape(dados["os"])}.
+</p>
+<p class="texto">Pagável em {html.escape(ENDERECO_EMPRESA)}.</p>
+<table>
+{_linha_doc("Emitente", dados["cliente"])}
+{_linha_doc("CPF/CNPJ do emitente", "")}
+{_linha_doc("Data de emissão", dados["emissao"])}
+{_linha_doc("Obs", dados["obs"])}
+</table>
+<div class="assinatura">Assinatura do emitente<br>{html.escape(dados["cliente"])}</div>
+</body>
+</html>"""
+
+
+def _dados_documento(linha: pd.Series, juros: float, multa: float, pago: float, quando: date | None, obs: str) -> dict:
+    cliente = texto_limpo(linha["nome"]) or "Cliente não informado"
+    numero_ordem = numero_os(linha["os"])
+    vencimento = data_br(linha["vencimento"]) or "não informado"
+    return {
+        "numero": str(int(linha["id"])),
+        "cliente": cliente,
+        "os": str(numero_ordem) if numero_ordem is not None else "—",
+        "descricao": texto_limpo(linha["descricao"]) or "Serviços e peças",
+        "parcela": texto_limpo(linha["parcela"]) or "—",
+        "vencimento": vencimento,
+        "vencimento_extenso": f"No vencimento de {vencimento}" if data_br(linha["vencimento"]) else "À vista",
+        "divida": brl(valor_banco(linha["valor"])),
+        "juros": brl(juros),
+        "multa": brl(multa),
+        "valor": brl(round(valor_banco(linha["valor"]) + juros + multa, 2)),
+        "valor_pago": brl(pago),
+        "extenso": reais_por_extenso(pago if pago else valor_banco(linha["valor"]) + juros + multa),
+        "pagamento": data_br(quando) or "—",
+        "emissao": date.today().strftime("%d/%m/%Y"),
+        "obs": obs.strip() or "—",
+    }
+
+
+def _ficha_conta(linha: pd.Series, dias: int | None) -> None:
+    numero = numero_os(linha["os"])
+    pares = [
+        ("Cliente", texto_limpo(linha["nome"]) or "—"),
+        ("Nº OS", str(numero) if numero is not None else "—"),
+        ("Descrição", texto_limpo(linha["descricao"]) or "—"),
+        ("Parcela", texto_limpo(linha["parcela"]) or "—"),
+        ("Vencimento", data_br(linha["vencimento"]) or "—"),
+        ("Dias vencidos", str(dias) if dias else "—"),
+        ("Valor original", brl(linha["valor"])),
+        ("Já pago", brl(linha["valor_pago"])),
+        ("Forma de pagamento", texto_limpo(linha["forma_pagamento"]) or "—"),
+        ("Documento", texto_limpo(linha["documento"]) or "—"),
+        ("Departamento", texto_limpo(linha["departamento"]) or "—"),
+        ("Conta", texto_limpo(linha["conta"]) or "—"),
+        ("Emissão", data_br(linha["emissao"]) or "—"),
+        ("Lançamento", data_br(linha["data_lancamento"]) or "—"),
+        ("Desconto", brl(linha["desconto"])),
+    ]
+    linhas = "".join(_linha_doc(rotulo, valor) for rotulo, valor in pares)
+    st.html(
+        "<style>.ficha-baixa th,.ficha-baixa td{border:1px solid #d5e4ee;padding:6px 8px;font-size:14px;text-align:left}"
+        ".ficha-baixa{width:100%;border-collapse:collapse}.ficha-baixa th{width:34%;background:#f4f8fb}</style>"
+        f"<table class='ficha-baixa'>{linhas}</table>"
+    )
+
+
+def _preparar_form_baixa(conta_id: int, linha: pd.Series, reabrir: bool) -> None:
+    if st.session_state.get("fin_baixa_init") == conta_id:
+        return
+    juros, multa, tem_salvo = _encargos_salvos(linha)
+    dias = dias_em_atraso(linha["vencimento"], "Nao" if reabrir else linha["quitado"])
+    saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
+    if not tem_salvo:
+        juros, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
+    obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    st.session_state[f"bx_juros_{conta_id}"] = float(juros)
+    st.session_state[f"bx_multa_{conta_id}"] = float(multa)
+    st.session_state[f"bx_obs_{conta_id}"] = obs
+    st.session_state[f"bx_pago_{conta_id}"] = float(valor_banco(linha["valor_pago"]) if reabrir else 0.0)
+    st.session_state[f"bx_data_{conta_id}"] = data_iso(linha["dt_pagamento"]) if reabrir else None
+    st.session_state.fin_baixa_init = conta_id
+
+
+def _totais_baixa(linha: pd.Series, conta_id: int, reabrir: bool) -> tuple[float, float, float, float]:
+    juros = valor_banco(st.session_state.get(f"bx_juros_{conta_id}"))
+    multa = valor_banco(st.session_state.get(f"bx_multa_{conta_id}"))
+    pago_campo = valor_banco(st.session_state.get(f"bx_pago_{conta_id}"))
+    ja_pago = valor_banco(linha["valor_pago"])
+    pago_total = pago_campo if reabrir else round(ja_pago + pago_campo, 2)
+    devido = round(valor_banco(linha["valor"]) + juros + multa, 2)
+    return juros, multa, pago_total, devido
+
+
+def _salvar_form_baixa(linha: pd.Series, conta_id: int, reabrir: bool, quitar: bool) -> None:
+    juros, multa, pago_total, devido = _totais_baixa(linha, conta_id, reabrir)
+    pago_campo = valor_banco(st.session_state.get(f"bx_pago_{conta_id}"))
+    quando = data_iso(st.session_state.get(f"bx_data_{conta_id}"))
+    if quitar and pago_total + 0.004 < devido:
+        st.error("A baixa só é concluída quando o valor pago é igual ou maior que a dívida com juros e multa.")
+        return
+    if not quitar and pago_total + 0.004 >= devido:
+        st.error("A baixa parcial fica para um valor menor que o total para quitação.")
+        return
+    if not quitar and not reabrir and pago_campo <= 0:
+        st.error("Informe o valor pago nesta baixa parcial.")
+        return
+    if pago_total > 0 and quando is None:
+        st.error("Informe a data do pagamento.")
+        return
+    obs = texto_banco(st.session_state.get(f"bx_obs_{conta_id}"))
+    gravar_conta_baixa(
+        conta_id,
+        pago=pago_total,
+        juros=juros,
+        multa=multa,
+        quando=quando,
+        obs=obs,
+        quitar=quitar,
+    )
+    st.session_state.baixa_aviso = 1
+    st.session_state.baixa_aviso_texto = (
+        "Baixa registrada. A conta foi quitada." if quitar else "Baixa parcial registrada. A conta continua em aberto."
+    )
+    fechar_baixa()
+    st.cache_data.clear()
+    st.rerun()
+
+
+@st.dialog("Baixa da conta", width="large", on_dismiss=fechar_baixa)
+def dialogo_baixa() -> None:
+    conta_id = st.session_state.get("fin_baixa_id")
+    if not conta_id:
+        return
+    linha = buscar_conta(int(conta_id))
+    if linha is None:
+        st.warning("Esta conta não está mais no financeiro.")
+        return
+    reabrir = bool(st.session_state.get("fin_baixa_reabrir"))
+    _preparar_form_baixa(int(conta_id), linha, reabrir)
+    if reabrir:
+        st.subheader("Reabrir baixa")
+    dias = dias_em_atraso(linha["vencimento"], "Nao")
+    _ficha_conta(linha, dias)
+    saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
+    base_legal = valor_banco(linha["valor"]) if reabrir else saldo
+    juros_lei, multa_lei = encargos_legais(base_legal, dias)
+    st.caption(
+        "Multa de 2% sobre o saldo vencido, uma vez (Código de Defesa do Consumidor, art. 52, § 1º). "
+        "Juros de mora de 1% ao mês, proporcionais aos dias (mês de 30 dias), teto usual da relação de consumo "
+        "quando não há índice contratado. Os valores sugeridos podem ser alterados antes de salvar. "
+        f"Sugestão para {dias or 0} dia(s): juros {brl(juros_lei)} e multa {brl(multa_lei)}."
+    )
+    j1, j2, j3 = st.columns([1, 1, 1], vertical_alignment="bottom")
+    j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"bx_juros_{conta_id}")
+    j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"bx_multa_{conta_id}")
+    j3.button(
+        "Recalcular pela lei",
+        key=f"bx_recalc_{conta_id}",
+        on_click=_recalcular_encargos,
+        args=(int(conta_id), base_legal, dias),
+        width="stretch",
+    )
+    rotulo_pago = "Valor pago" if reabrir else "Valor pago nesta baixa"
+    p1, p2 = st.columns(2)
+    p1.number_input(
+        rotulo_pago,
+        min_value=0.0,
+        step=0.01,
+        format="%.2f",
+        key=f"bx_pago_{conta_id}",
+        on_change=_sync_data_pagamento,
+        args=(int(conta_id),),
+    )
+    p2.date_input(
+        "Data do pagamento",
+        format="DD/MM/YYYY",
+        key=f"bx_data_{conta_id}",
+    )
+    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=80)
+    juros, multa, pago_total, devido = _totais_baixa(linha, int(conta_id), reabrir)
+    restante = round(max(0.0, devido - pago_total), 2)
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Total para quitação", brl(devido))
+    r2.metric("Valor pago acumulado", brl(pago_total))
+    r3.metric("Valor restante", brl(restante))
+    pode_quitar = pago_total + 0.004 >= devido and pago_total > 0
+    pode_parcial = pago_total + 0.004 < devido and (
+        valor_banco(st.session_state.get(f"bx_pago_{conta_id}")) > 0 or reabrir
+    )
+    b1, b2 = st.columns(2)
+    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"bx_salvar_{conta_id}", disabled=not pode_quitar):
+        _salvar_form_baixa(linha, int(conta_id), reabrir, True)
+    if b2.button("Salvar baixa parcial", width="stretch", key=f"bx_parcial_{conta_id}", disabled=not pode_parcial):
+        _salvar_form_baixa(linha, int(conta_id), reabrir, False)
+    if not pode_quitar:
+        st.caption("A baixa integral só fica disponível quando o valor pago é igual ou maior que o total para quitação.")
+    quando = data_iso(st.session_state.get(f"bx_data_{conta_id}"))
+    obs = texto_banco(st.session_state.get(f"bx_obs_{conta_id}"))
+    dados = _dados_documento(linha, juros, multa, pago_total, quando, obs)
+    dados_nota = dict(dados)
+    valor_nota = restante if restante > 0 else devido
+    dados_nota["valor"] = brl(valor_nota)
+    dados_nota["extenso"] = reais_por_extenso(valor_nota)
+    i1, i2 = st.columns(2)
+    if i1.button("Imprimir recibo quitado", width="stretch", key=f"bx_recibo_{conta_id}", disabled=not pode_quitar):
+        disparar_impressao(html_recibo(dados))
+    if i2.button("Imprimir nota promissória", width="stretch", key=f"bx_nota_{conta_id}"):
+        disparar_impressao(html_promissoria(dados_nota))
+
+
+def _celula_dias(dias: int | None) -> None:
+    if not dias:
+        st.write("—")
+        return
+    st.html(
+        f"<div style='font-size:18px;font-weight:700;line-height:1.2;color:#9a3412'>{int(dias)}</div>"
+    )
+
+
+def listar_contas_abertas(contas: pd.DataFrame) -> None:
+    cab = st.columns([1.05, 3.3, 1.35, 1.25, 1.45, 1.15], vertical_alignment="center")
+    for coluna, titulo in zip(cab, ("Nº OS", "Descrição", "Vencimento", "Dias vencidos", "Valor da dívida", ""), strict=True):
+        if titulo:
+            coluna.markdown(f"**{titulo}**")
+    for registro in contas.itertuples(index=False):
+        conta_id = int(registro.id)
+        numero = numero_os(registro.os)
+        dias = dias_em_atraso(registro.vencimento, registro.quitado)
+        divida = valor_divida_exibida(registro.valor, registro.valor_pago, getattr(registro, "juros", 0), getattr(registro, "multa", 0))
+        with st.container(border=True):
+            cols = st.columns([1.05, 3.3, 1.35, 1.25, 1.45, 1.15], vertical_alignment="center")
+            if numero is None:
+                cols[0].write("—")
+            else:
+                cols[0].button(
+                    str(numero),
+                    key=f"os_abertas_{conta_id}",
+                    on_click=abrir_os_da_conta,
+                    args=(numero, "abertas"),
+                )
+            cols[1].write(texto_limpo(registro.descricao) or "—")
+            cols[2].write(data_br(registro.vencimento) or "—")
+            with cols[3]:
+                _celula_dias(dias)
+            cols[4].write(brl(divida))
+            cols[5].button(
+                "Baixar",
+                type="primary",
+                key=f"baixar_{conta_id}",
+                on_click=abrir_baixa,
+                args=(conta_id, False),
+                width="stretch",
+            )
+
+
+def listar_baixas_recentes(contas: pd.DataFrame) -> None:
+    cab = st.columns([1.05, 3.3, 1.45, 1.45, 1.35], vertical_alignment="center")
+    for coluna, titulo in zip(cab, ("Nº OS", "Descrição", "Pagamento", "Valor pago", ""), strict=True):
+        if titulo:
+            coluna.markdown(f"**{titulo}**")
+    for registro in contas.itertuples(index=False):
+        conta_id = int(registro.id)
+        numero = numero_os(registro.os)
+        with st.container(border=True):
+            cols = st.columns([1.05, 3.3, 1.45, 1.45, 1.35], vertical_alignment="center")
+            if numero is None:
+                cols[0].write("—")
+            else:
+                cols[0].button(
+                    str(numero),
+                    key=f"os_recentes_{conta_id}",
+                    on_click=abrir_os_da_conta,
+                    args=(numero, "recentes"),
+                )
+            cols[1].write(texto_limpo(registro.descricao) or "—")
+            cols[2].write(data_br(registro.dt_pagamento) or "—")
+            cols[3].write(brl(registro.valor_pago))
+            cols[4].button(
+                "Reabrir baixa",
+                type="primary",
+                key=f"reabrir_{conta_id}",
+                on_click=abrir_baixa,
+                args=(conta_id, True),
+                width="stretch",
+            )
+
+
 def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -> None:
     versao_chave = f"baixa_versao_{origem}"
     rascunho_chave = f"rascunho_{origem}"
@@ -1758,6 +2400,10 @@ def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -
 def aba_financeiro() -> None:
     rolar = st.session_state.pop("fin_rolar", None)
     termo = pesquisa_financeiro()
+    tem_encargos = garantir_encargos()
+    cols_encargos = (
+        ", COALESCE(juros, 0) AS juros, COALESCE(multa, 0) AS multa" if tem_encargos else ""
+    )
     params_abertas: list = []
     filtro_aberto = clausula_pesquisa_oficina(termo, params_abertas)
     limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
@@ -1782,6 +2428,7 @@ def aba_financeiro() -> None:
         SELECT id, os, nome, quitado, vencimento, valor, valor_pago,
                ROUND(COALESCE(valor, 0) - COALESCE(valor_pago, 0), 2) AS saldo,
                dt_pagamento, obs_conta, forma_pagamento, parcela, descricao
+               {cols_encargos}
         FROM oficina_financeiro
         WHERE {ABERTO_SQL}{filtro_aberto}
         ORDER BY CASE WHEN vencimento IS NULL OR TRIM(vencimento) = '' THEN 1 ELSE 0 END,
@@ -1794,32 +2441,42 @@ def aba_financeiro() -> None:
     ancora_fin("abertas")
     st.subheader("Contas em aberto")
     aviso = st.session_state.pop("baixa_aviso", None)
+    aviso_texto = st.session_state.pop("baixa_aviso_texto", None)
     if aviso:
-        st.success(f"{inteiro(aviso)} conta(s) atualizada(s).")
+        st.success(aviso_texto or f"{inteiro(aviso)} conta(s) atualizada(s).")
     elif aviso == 0:
         st.info("Nenhuma alteração para salvar.")
+    total_aberto = 0.0
+    if not abertas.empty:
+        total_aberto = round(
+            sum(
+                valor_divida_exibida(
+                    registro.valor,
+                    registro.valor_pago,
+                    getattr(registro, "juros", 0),
+                    getattr(registro, "multa", 0),
+                )
+                for registro in abertas.itertuples(index=False)
+            ),
+            2,
+        )
     c1, c2 = st.columns(2)
     c1.metric("Contas pendentes", inteiro(len(abertas)))
-    c2.metric("Total em aberto", brl(abertas["saldo"].sum() if not abertas.empty else 0))
+    c2.metric("Total em aberto", brl(total_aberto))
     if abertas.empty:
         st.info("Nenhuma conta de receita em aberto.")
     else:
-        editor_baixas(
-            abertas,
-            "abertas",
-            "fin_click_abertas",
-            "Contas em aberto em laranja. Dias vencidos conta a partir do vencimento. "
-            "Informe o valor pago: se ele for igual ou maior que o valor da conta, Quitado vira Sim "
-            "e a data de hoje entra em Dt pagamento. A data continua editável. "
-            "Com valor menor, Quitado e Dt pagamento não são preenchidos. "
-            "O restante do painel não pode ser alterado. Clique no número da O.S. para abrir a ordem.",
+        st.caption(
+            "A descrição fica na segunda coluna. Dias vencidos aparecem em negrito. "
+            "Baixar abre a conta no centro da tela para o pagamento, juros, multa, obs e impressão."
         )
+        listar_contas_abertas(abertas)
 
     ancora_fin("recentes")
     st.subheader("Baixas recentes")
     st.caption(
-        f"Contas quitadas nos últimos {DIAS_EDICAO_BAIXA} dias ficam em azul e ainda podem ser corrigidas. "
-        "Depois desse prazo a baixa fica bloqueada, como o restante do painel."
+        f"Contas quitadas nos últimos {DIAS_EDICAO_BAIXA} dias. "
+        "Reabrir baixa abre a mesma tela da conta para os ajustes."
     )
     if recentes.empty:
         mostrar_lembrete_baixa()
@@ -1827,12 +2484,7 @@ def aba_financeiro() -> None:
         r1, r2 = st.columns(2)
         r1.metric("Baixas no prazo", inteiro(len(recentes)))
         r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
-        editor_baixas(
-            recentes,
-            "recentes",
-            "fin_click_recentes",
-            "Ajuste Valor pago, Quitado, Dt pagamento ou Obs conta se a baixa precisar de correção.",
-        )
+        listar_baixas_recentes(recentes)
 
     ancora_fin("todas")
     st.subheader("Todas as contas")
@@ -1902,7 +2554,9 @@ def aba_financeiro() -> None:
     m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
     m3.metric("Saldo em aberto", brl(totais.iat[0, 3]))
     tabela_contas(frame, "todas", "fin_click_todas")
-    if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") != "ordens":
+    if st.session_state.get("fin_baixa_id"):
+        dialogo_baixa()
+    elif st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") != "ordens":
         dialogo_os()
     if rolar in {"abertas", "recentes", "todas"}:
         st.html(
@@ -2443,6 +3097,26 @@ def garantir_usuarios() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_presenca (
+                    sessao text PRIMARY KEY,
+                    usuario_id bigint NOT NULL,
+                    visto_em timestamptz NOT NULL DEFAULT now(),
+                    conectado boolean NOT NULL DEFAULT true
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS painel_presenca_usuario
+                ON painel_presenca (usuario_id)
+                """
+            )
+        )
 
 
 def _host_local(host: str) -> bool:
@@ -2552,10 +3226,145 @@ def listar_log(limite: int = 400) -> pd.DataFrame:
     return frame
 
 
+SEGUNDOS_ONLINE = 120
+
+
+def id_sessao() -> str:
+    sessao = st.session_state.get("sessao_id")
+    if not sessao:
+        sessao = uuid.uuid4().hex
+        st.session_state.sessao_id = sessao
+    return str(sessao)
+
+
+def marcar_presenca(usuario_id: int) -> None:
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO painel_presenca (sessao, usuario_id, visto_em, conectado)
+                VALUES (:sessao, :usuario_id, now(), true)
+                ON CONFLICT (sessao) DO UPDATE
+                SET usuario_id = EXCLUDED.usuario_id,
+                    visto_em = now(),
+                    conectado = true
+                """
+            ),
+            {"sessao": id_sessao(), "usuario_id": int(usuario_id)},
+        )
+
+
+def desconectar_sessao() -> None:
+    sessao = st.session_state.get("sessao_id")
+    if not sessao:
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE painel_presenca
+                SET conectado = false,
+                    visto_em = now()
+                WHERE sessao = :sessao
+                """
+            ),
+            {"sessao": sessao},
+        )
+
+
+def listar_presenca() -> pd.DataFrame:
+    colunas = ["usuario", "login", "situacao", "ultimo_acesso"]
+    with engine().connect() as conn:
+        linhas = conn.execute(
+            text(
+                """
+                SELECT u.nome AS usuario,
+                       u.login,
+                       CASE
+                           WHEN NOT u.ativo THEN 'Inativo'
+                           WHEN COALESCE(p.online, false) THEN 'Conectado'
+                           ELSE 'Desconectado'
+                       END AS situacao,
+                       p.ultimo_acesso
+                FROM painel_usuario u
+                LEFT JOIN LATERAL (
+                    SELECT bool_or(
+                               conectado
+                               AND visto_em > now() - make_interval(secs => :segundos)
+                           ) AS online,
+                           MAX(visto_em) AT TIME ZONE 'America/Sao_Paulo' AS ultimo_acesso
+                    FROM painel_presenca
+                    WHERE usuario_id = u.id
+                ) p ON true
+                ORDER BY
+                    CASE
+                        WHEN NOT u.ativo THEN 2
+                        WHEN COALESCE(p.online, false) THEN 0
+                        ELSE 1
+                    END,
+                    u.nome,
+                    u.login
+                """
+            ),
+            {"segundos": SEGUNDOS_ONLINE},
+        ).mappings().all()
+    frame = pd.DataFrame(linhas, columns=colunas)
+    if not frame.empty:
+        frame["ultimo_acesso"] = pd.to_datetime(frame["ultimo_acesso"])
+    return frame
+
+
+@st.fragment(run_every="45s")
+def pulso_presenca() -> None:
+    usuario = st.session_state.get("usuario")
+    if not usuario or not usuario.get("id"):
+        return
+    try:
+        marcar_presenca(int(usuario["id"]))
+    except Exception:
+        return
+
+
+@st.fragment(run_every="30s")
+def mostrar_presenca() -> None:
+    quadro = listar_presenca()
+    st.subheader("Conexões")
+    if quadro.empty:
+        st.info("Nenhum usuário cadastrado.")
+        return
+    conectados = int((quadro["situacao"] == "Conectado").sum())
+    st.caption(
+        f"{inteiro(conectados)} conectado(s). "
+        "A pessoa fica conectada com o painel aberto e desconectada ao sair, "
+        "ou cerca de 2 minutos depois de fechar a tela."
+    )
+    tabela = quadro.rename(
+        columns={
+            "usuario": "Usuário",
+            "login": "Login",
+            "situacao": "Situação",
+            "ultimo_acesso": "Último acesso",
+        }
+    )
+    st.dataframe(
+        tabela,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Último acesso": st.column_config.DatetimeColumn(
+                "Último acesso",
+                format="DD/MM/YYYY HH:mm",
+            ),
+        },
+        alt="Usuários conectados e último acesso",
+    )
+
+
 def encerrar_sessao() -> None:
     usuario = st.session_state.get("usuario")
     if usuario:
         registrar_log("Saída", f"Saiu do painel {texto_link_acesso()}.", usuario=usuario)
+    desconectar_sessao()
     st.session_state.pop("usuario", None)
     st.session_state.pop("modulo", None)
     st.rerun()
@@ -2911,6 +3720,7 @@ def aba_log() -> None:
         st.session_state.aba = ABA_GERAL
         st.rerun()
     st.subheader("Log")
+    mostrar_presenca()
     st.caption(
         "Acessos e alterações do painel, do mais recente para o mais antigo. "
         "O registro começa a partir de agora."
@@ -3185,12 +3995,14 @@ def main() -> None:
     if "usuario" in st.session_state:
         usuario = usuario_sessao(int(st.session_state.usuario["id"]))
         if usuario is None:
+            desconectar_sessao()
             st.session_state.pop("usuario", None)
         else:
             st.session_state.usuario = usuario
     if "usuario" not in st.session_state:
         tela_acesso()
         return
+    pulso_presenca()
     if st.session_state.usuario.get("trocar_senha"):
         tela_trocar_senha()
         return
