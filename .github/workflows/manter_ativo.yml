@@ -1,0 +1,29 @@
+name: Manter painel e banco ativos
+
+on:
+  schedule:
+    # A cada 8 horas, antes das 12 horas em que o Streamlit adormece. Horário UTC.
+    - cron: "0 */8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  atividade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar navegador e cliente do banco
+        run: |
+          pip install playwright sqlalchemy "psycopg[binary]"
+          playwright install --with-deps chromium
+      - name: Visitar o painel e consultar o Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          PAINEL_URL: https://planilhasoficinaintegrada-3qrhgcdbmi2meududc.streamlit.app/
+        run: python .github/manter_ativo.py
