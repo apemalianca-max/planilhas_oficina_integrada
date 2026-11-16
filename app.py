@@ -2512,8 +2512,14 @@ def main() -> None:
         tela_acesso()
         return
     usuario = st.session_state.usuario
-    st.title(TITULO)
-    st.caption("Histórico no Supabase")
+    titulo, sair = st.columns([6, 1], vertical_alignment="center")
+    with titulo:
+        st.title(TITULO)
+        st.caption("Histórico no Supabase")
+    with sair:
+        if st.button("Sair", width="stretch", key="sair_topo"):
+            st.session_state.pop("usuario", None)
+            st.rerun()
     if "aba" not in st.session_state:
         st.session_state.aba = ABA_GERAL
     if "financeiro_aberto" not in st.session_state:
@@ -2535,7 +2541,7 @@ def main() -> None:
         if usuario["administrador"]:
             st.caption("Administrador")
         st.write("Histórico da Oficina Integrada. As baixas das contas em aberto são gravadas neste banco.")
-        if st.button("Sair", width="stretch"):
+        if st.button("Sair", width="stretch", key="sair_menu"):
             st.session_state.pop("usuario", None)
             st.rerun()
         if st.button("Atualizar dados", width="stretch"):
