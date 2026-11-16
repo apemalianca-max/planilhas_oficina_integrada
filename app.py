@@ -337,9 +337,21 @@ def _sql_pg(sql: str, params: tuple = ()) -> tuple[str, dict]:
     return convertido, bind
 
 
+def _supabase_url() -> str:
+    if "SUPABASE_URL" in st.secrets:
+        url = str(st.secrets["SUPABASE_URL"])
+    else:
+        url = str(st.secrets["supabase"]["url"])
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 @st.cache_resource
 def engine():
-    return create_engine(st.secrets["supabase"]["url"], pool_pre_ping=True)
+    return create_engine(_supabase_url(), pool_pre_ping=True)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
