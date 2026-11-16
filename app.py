@@ -2435,6 +2435,14 @@ def garantir_usuarios() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE painel_log
+                ADD COLUMN IF NOT EXISTS modulo text
+                """
+            )
+        )
 
 
 def _host_local(host: str) -> bool:
@@ -2448,6 +2456,11 @@ def _host_local(host: str) -> bool:
         if primeiro == 172 and 16 <= segundo <= 31:
             return True
     return False
+
+
+MODULO_OS = "OS - Oficina Integrada"
+MODULO_PV = "PV - Next"
+ROTULOS_MODULO = {"os": MODULO_OS, "pv": MODULO_PV}
 
 
 def origem_acesso() -> str:
@@ -2482,6 +2495,7 @@ def registrar_log(
     *,
     usuario: dict | None = None,
     login_informado: str | None = None,
+    modulo: str | None = None,
     conn=None,
 ) -> None:
     if usuario is None and login_informado is None:
@@ -2495,13 +2509,14 @@ def registrar_log(
         "acao": acao,
         "detalhe": detalhe,
         "origem": origem_acesso(),
+        "modulo": modulo if modulo is not None else ROTULOS_MODULO.get(st.session_state.get("modulo") or ""),
     }
     sql = text(
         """
         INSERT INTO painel_log
-            (usuario_id, usuario_nome, usuario_login, acao, detalhe, origem)
+            (usuario_id, usuario_nome, usuario_login, acao, detalhe, origem, modulo)
         VALUES
-            (:usuario_id, :usuario_nome, :usuario_login, :acao, :detalhe, :origem)
+            (:usuario_id, :usuario_nome, :usuario_login, :acao, :detalhe, :origem, :modulo)
         """
     )
     if conn is not None:
@@ -2512,7 +2527,7 @@ def registrar_log(
 
 
 def listar_log(limite: int = 400) -> pd.DataFrame:
-    colunas = ["quando", "usuario", "login", "acao", "origem", "detalhe"]
+    colunas = ["quando", "usuario", "login", "acao", "modulo", "origem", "detalhe"]
     with engine().connect() as conn:
         linhas = conn.execute(
             text(
@@ -2521,6 +2536,7 @@ def listar_log(limite: int = 400) -> pd.DataFrame:
                        COALESCE(usuario_nome, '') AS usuario,
                        COALESCE(usuario_login, '') AS login,
                        acao,
+                       COALESCE(NULLIF(modulo, ''), '—') AS modulo,
                        COALESCE(NULLIF(origem, ''), 'Não informado') AS origem,
                        detalhe
                 FROM painel_log
@@ -2541,6 +2557,7 @@ def encerrar_sessao() -> None:
     if usuario:
         registrar_log("Saída", f"Saiu do painel {texto_link_acesso()}.", usuario=usuario)
     st.session_state.pop("usuario", None)
+    st.session_state.pop("modulo", None)
     st.rerun()
 
 
@@ -2916,7 +2933,7 @@ def aba_log() -> None:
     termo = texto.strip()
     if termo:
         mascara = pd.Series(False, index=visivel.index)
-        for coluna in ("usuario", "login", "acao", "origem", "detalhe"):
+        for coluna in ("usuario", "login", "acao", "modulo", "origem", "detalhe"):
             mascara = mascara | visivel[coluna].astype(str).str.contains(termo, case=False, na=False, regex=False)
         visivel = visivel[mascara]
     if visivel.empty:
@@ -2929,6 +2946,7 @@ def aba_log() -> None:
             "usuario": "Usuário",
             "login": "Login",
             "acao": "Ação",
+            "modulo": "Módulo",
             "origem": "Origem",
             "detalhe": "Detalhe",
         }
@@ -2989,6 +3007,106 @@ def esconder_gerenciar() -> None:
         """,
         unsafe_allow_javascript=True,
     )
+
+
+def tela_modulos() -> None:
+    st.html(
+        """
+        <style>
+        .st-key-capa_loja h1 {
+          text-align: center;
+          color: #0c6b4d;
+          font-weight: 700;
+        }
+        .st-key-menu_modulos,
+        .st-key-menu_modulos [data-testid="stHorizontalBlock"] {
+          width: 100%;
+          justify-content: center !important;
+        }
+        .st-key-menu_modulos button {
+          background-color: #0c6b4d !important;
+          color: #f4fbf7 !important;
+          border: 1px solid #084a36 !important;
+          border-radius: 999px !important;
+          box-shadow: 0 8px 18px rgba(12, 107, 77, 0.34) !important;
+          font-weight: 700 !important;
+          min-width: 16rem;
+          height: auto !important;
+          line-height: 1.25;
+          text-align: center !important;
+          padding: 0.75rem 1.4rem !important;
+        }
+        .st-key-menu_modulos button p {
+          width: 100%;
+          margin: 0;
+          text-align: center !important;
+        }
+        .st-key-menu_modulos button:hover {
+          background-color: #14845f !important;
+        }
+        </style>
+        <script>
+        (function () {
+          const raiz = document.documentElement;
+          raiz.lang = "pt-BR";
+          raiz.setAttribute("translate", "no");
+          const travar = () => {
+            document.querySelectorAll("button, h1, p, label").forEach((el) => {
+              el.setAttribute("translate", "no");
+            });
+          };
+          travar();
+          if (window.__travarTexto) window.__travarTexto.disconnect();
+          window.__travarTexto = new MutationObserver(travar);
+          window.__travarTexto.observe(document.body, {childList: true, subtree: true});
+        })();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+    with st.container(key="capa_loja", horizontal_alignment="center"):
+        mostrar_logo(200)
+        st.title(TITULO)
+    with st.container(
+        key="menu_modulos",
+        horizontal=True,
+        horizontal_alignment="center",
+        gap="medium",
+    ):
+        if st.button(f"{MODULO_OS}  \nSERVIÇOS", key="mod_os", type="primary", wrap=True):
+            st.session_state.modulo = "os"
+            registrar_log("Acesso", f"Acessou o módulo {MODULO_OS}.")
+            st.rerun()
+        if st.button(f"{MODULO_PV}  \nPEÇAS", key="mod_pv", type="primary", wrap=True):
+            st.session_state.modulo = "pv"
+            registrar_log("Acesso", f"Acessou o módulo {MODULO_PV}.", modulo=MODULO_PV)
+            st.rerun()
+    if st.button("Sair", key="sair_modulos"):
+        encerrar_sessao()
+
+
+def tela_pv() -> None:
+    st.html(
+        """
+        <style>
+        .st-key-capa_pv h1 {
+          text-align: center;
+          color: #0c6b4d;
+          font-weight: 700;
+        }
+        .st-key-capa_pv [data-testid="stAlert"] {
+          text-align: center;
+        }
+        </style>
+        """
+    )
+    with st.container(key="capa_pv", horizontal_alignment="center"):
+        mostrar_logo(200)
+        st.title(MODULO_PV)
+        st.info("Este módulo está em construção.")
+        if st.button("Menu", key="voltar_menu_pv"):
+            st.session_state.modulo = None
+            st.rerun()
 
 
 def menu_principal(abas: list[str]) -> None:
@@ -3077,12 +3195,22 @@ def main() -> None:
         tela_trocar_senha()
         return
     usuario = st.session_state.usuario
+    modulo = st.session_state.get("modulo")
+    if modulo == "pv":
+        tela_pv()
+        return
+    if modulo != "os":
+        tela_modulos()
+        return
     logo, titulo, sair = st.columns([1, 4, 1], vertical_alignment="center")
     with logo:
         mostrar_logo(92)
     with titulo:
         st.title(TITULO)
     with sair:
+        if st.button("Menu", width="stretch", key="voltar_menu"):
+            st.session_state.modulo = None
+            st.rerun()
         if st.button("Sair", width="stretch", key="sair_topo"):
             encerrar_sessao()
     if "aba" not in st.session_state:
