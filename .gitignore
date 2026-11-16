@@ -1,0 +1,8 @@
+# Publica só o painel Streamlit. O restante desta pasta é a instalação local do NeXT ERP.
+/*
+!/.gitignore
+!/requirements.txt
+!/app.py
+!/migrar_para_supabase.py
+!/.streamlit/
+/.streamlit/secrets.toml
