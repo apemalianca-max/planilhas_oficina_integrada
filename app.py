@@ -7,6 +7,7 @@ try:
     import html
     import json
     import secrets
+    import unicodedata
     import uuid
     from datetime import date, datetime, timedelta
     from pathlib import Path
@@ -87,6 +88,8 @@ ABA_NF = "Notas Fiscais (NFS-e)"
 ABA_USUARIOS = "Usuários"
 ABA_LOG = "Log"
 ABAS = [ABA_GERAL, ABA_OS, ABA_FIN, ABA_CLI, ABA_NF]
+ABA_RECEBER = "Contas a receber"
+ABA_PAGAR = "Contas a pagar"
 CHAVES_MENU = {
     ABA_GERAL: "nav_visao",
     ABA_OS: "nav_os",
@@ -95,6 +98,8 @@ CHAVES_MENU = {
     ABA_NF: "nav_notas",
     ABA_USUARIOS: "nav_usuarios",
     ABA_LOG: "nav_log",
+    ABA_RECEBER: "nav_receber",
+    ABA_PAGAR: "nav_pagar",
 }
 
 OS_RESUMO_COLS = [
@@ -207,6 +212,7 @@ DATE_COLS = {
     "emissao",
     "data_cadastro",
     "date_recebimento_status",
+    "importado_em",
 }
 SITUACAO_SQL = (
     "CASE WHEN situacao LIKE 'AGUARDANDO APROVA%' "
@@ -229,18 +235,47 @@ def inteiro(value) -> str:
     return f"{int(value):,}".replace(",", ".")
 
 
+_ACENTOS = "áàâãäåéèêëíìîïóòôõöúùûüýÿçñ"
+_SEM_ACENTO = "aaaaaaeeeeiiiiooooouuuuyycn"
+
+
+def sem_acento(texto: str) -> str:
+    base = unicodedata.normalize("NFD", str(texto).casefold())
+    sem_marca = "".join(caractere for caractere in base if unicodedata.category(caractere) != "Mn")
+    return sem_marca.translate(str.maketrans(_ACENTOS, _SEM_ACENTO))
+
+
 def like(text: str) -> str:
-    escaped = text.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = sem_acento(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 
+def comparar_busca(expressao: str) -> str:
+    return (
+        "translate(lower(COALESCE(CAST("
+        + expressao
+        + " AS TEXT), '')), '"
+        + _ACENTOS
+        + "', '"
+        + _SEM_ACENTO
+        + "') LIKE ? ESCAPE '\\'"
+    )
+
+
+def contem_termo(serie: pd.Series, termo: str) -> pd.Series:
+    alvo = sem_acento(termo.strip())
+    if not alvo:
+        return pd.Series(False, index=serie.index)
+    return serie.fillna("").astype(str).map(sem_acento).str.contains(alvo, regex=False)
+
+
 def termos_busca(texto: str) -> list[str]:
-    bruto = texto.strip()
+    bruto = sem_acento(texto.strip())
     if not bruto:
         return []
     limpo = "".join(caractere for caractere in bruto if caractere.isalnum())
     termos = [bruto]
-    if limpo and limpo.casefold() != bruto.casefold():
+    if limpo and limpo != bruto:
         termos.append(limpo)
     return termos
 
@@ -299,21 +334,21 @@ def clausula_pesquisa_oficina(termo: str, params: list) -> str:
     if not termos:
         return ""
     partes = []
-    for campo in ("CAST(os AS TEXT)", "IFNULL(nome, '')"):
+    for campo in ("os", "nome"):
         for item in termos:
-            partes.append(f"{campo} LIKE ? ESCAPE '\\'")
+            partes.append(comparar_busca(campo))
             params.append(like(item))
     existe = []
     for campo in (
-        "CAST(o.id_os AS TEXT)",
-        "IFNULL(o.nome_cliente, '')",
-        "IFNULL(o.placa, '')",
-        "IFNULL(o.placa_veiculo, '')",
-        "IFNULL(o.mecanico, '')",
-        "IFNULL(o.obs, '')",
+        "o.id_os",
+        "o.nome_cliente",
+        "o.placa",
+        "o.placa_veiculo",
+        "o.mecanico",
+        "o.obs",
     ):
         for item in termos:
-            existe.append(f"{campo} LIKE ? ESCAPE '\\'")
+            existe.append(comparar_busca(campo))
             params.append(like(item))
     partes.append(
         "EXISTS (SELECT 1 FROM oficina_os o WHERE o.id_os = oficina_financeiro.os AND ("
@@ -522,7 +557,7 @@ def obs_os_existe(termo: str, vinculo: str, condicao: str = "") -> tuple[str, li
     partes = []
     valores = []
     for item in termos:
-        partes.append("IFNULL(o.obs, '') LIKE ? ESCAPE '\\'")
+        partes.append(comparar_busca("o.obs"))
         valores.append(like(item))
     filtro = f" AND {condicao}" if condicao else ""
     sql = (
@@ -540,17 +575,20 @@ def text_clause(
     extras: list[tuple[str, list]] | None = None,
 ) -> str:
     extras = [(sql, valores) for sql, valores in (extras or []) if sql]
-    if not text.strip() and not extras:
+    termos = termos_busca(text)
+    if not termos and not extras:
         return ""
     parts = []
-    if text.strip():
-        token = like(text)
+    for item in termos:
+        token = like(item)
         for column in columns:
-            parts.append(f"IFNULL(CAST({column} AS TEXT), '') LIKE ? ESCAPE '\\'")
+            parts.append(comparar_busca(column))
             params.append(token)
     for sql, valores in extras:
         parts.append(sql)
         params.extend(valores)
+    if not parts:
+        return ""
     return " AND (" + " OR ".join(parts) + ")"
 
 
@@ -591,7 +629,7 @@ def ir_financeiro_aberto() -> None:
 
 
 def texto_lembrete_baixa() -> str:
-    aviso = f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias."
+    aviso = f"NENHUMA BAIXA NOS ÚLTIMOS {DIAS_EDICAO_BAIXA} DIAS."
     ultima = scalar(
         """
         SELECT MAX(substr(IFNULL(dt_pagamento, ''), 1, 10))
@@ -1413,14 +1451,9 @@ def clausula_historico(termo: str, params: list) -> str:
     if not termos:
         return ""
     partes = []
-    for campo in (
-        "IFNULL(nome_cliente, '')",
-        "IFNULL(placa, '')",
-        "IFNULL(placa_veiculo, '')",
-        "IFNULL(obs, '')",
-    ):
+    for campo in ("nome_cliente", "placa", "placa_veiculo", "obs"):
         for item in termos:
-            partes.append(f"{campo} LIKE ? ESCAPE '\\'")
+            partes.append(comparar_busca(campo))
             params.append(like(item))
     return " AND (" + " OR ".join(partes) + ")"
 
@@ -2632,12 +2665,9 @@ def nome_do_grupo(valores: pd.Series) -> str:
 
 
 def chaves_da_busca(base: pd.DataFrame, termo: str) -> set[str] | None:
-    texto = termo.strip().casefold()
-    if not texto or base.empty:
+    if not termo.strip() or base.empty:
         return None
-    cliente = base["cliente"].fillna("").str.casefold()
-    placa = base["placa"].fillna("").str.casefold()
-    mask = cliente.str.contains(texto, regex=False) | placa.str.contains(texto, regex=False)
+    mask = contem_termo(base["cliente"], termo) | contem_termo(base["placa"], termo)
     return set(base.loc[mask, "chave"])
 
 
@@ -3319,10 +3349,14 @@ def pulso_presenca() -> None:
     usuario = st.session_state.get("usuario")
     if not usuario or not usuario.get("id"):
         return
+    agora = datetime.now().timestamp()
+    if st.session_state.get("pulso_em", 0) + 25 > agora:
+        return
     try:
         marcar_presenca(int(usuario["id"]))
     except Exception:
         return
+    st.session_state.pulso_em = agora
 
 
 @st.fragment(run_every="30s")
@@ -3744,7 +3778,7 @@ def aba_log() -> None:
     if termo:
         mascara = pd.Series(False, index=visivel.index)
         for coluna in ("usuario", "login", "acao", "modulo", "origem", "detalhe"):
-            mascara = mascara | visivel[coluna].astype(str).str.contains(termo, case=False, na=False, regex=False)
+            mascara = mascara | contem_termo(visivel[coluna], termo)
         visivel = visivel[mascara]
     if visivel.empty:
         st.info("Nenhum registro com esse filtro.")
@@ -3895,32 +3929,1584 @@ def tela_modulos() -> None:
         encerrar_sessao()
 
 
-def tela_pv() -> None:
-    st.html(
+PASTA_PLANILHAS_NEXT = Path(
+    r"C:\Users\apema\OneDrive\Aliança\Documentos\OFICINA INTEGRADA\NEXT - planilhas"
+)
+_XML_PLANILHA = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def _celula_planilha(referencia: str) -> tuple[int, int]:
+    coluna = ""
+    linha = ""
+    for caractere in referencia:
+        if caractere.isalpha():
+            coluna += caractere
+        else:
+            linha += caractere
+    numero = 0
+    for caractere in coluna:
+        numero = numero * 26 + ord(caractere.upper()) - 64
+    return numero, int(linha or 0)
+
+
+def ler_primeira_aba(conteudo: bytes) -> list[list[str]]:
+    import xml.etree.ElementTree as ET
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    with ZipFile(BytesIO(conteudo)) as arquivo:
+        compartilhadas: list[str] = []
+        if "xl/sharedStrings.xml" in arquivo.namelist():
+            raiz = ET.fromstring(arquivo.read("xl/sharedStrings.xml"))
+            for item in raiz.findall(f"{_XML_PLANILHA}si"):
+                compartilhadas.append(
+                    "".join(texto.text or "" for texto in item.iter(f"{_XML_PLANILHA}t"))
+                )
+        relacoes = ET.fromstring(arquivo.read("xl/_rels/workbook.xml.rels"))
+        destino = {
+            relacao.attrib["Id"]: relacao.attrib["Target"]
+            for relacao in relacoes
+        }
+        livro = ET.fromstring(arquivo.read("xl/workbook.xml"))
+        folha = livro.find(f"{_XML_PLANILHA}sheets/{_XML_PLANILHA}sheet")
+        if folha is None:
+            return []
+        alvo = destino[folha.attrib["{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"]]
+        if not alvo.startswith("xl/"):
+            alvo = "xl/" + alvo.lstrip("/")
+        raiz = ET.fromstring(arquivo.read(alvo))
+    grade: dict[int, dict[int, str]] = {}
+    for celula in raiz.iter(f"{_XML_PLANILHA}c"):
+        coluna, linha = _celula_planilha(celula.attrib.get("r", ""))
+        if linha <= 0:
+            continue
+        tipo = celula.attrib.get("t")
+        valor = celula.find(f"{_XML_PLANILHA}v")
+        if tipo == "s" and valor is not None and valor.text:
+            texto = compartilhadas[int(valor.text)]
+        elif tipo == "inlineStr":
+            texto = "".join(item.text or "" for item in celula.iter(f"{_XML_PLANILHA}t"))
+        else:
+            texto = valor.text if valor is not None and valor.text else ""
+        grade.setdefault(linha, {})[coluna] = texto
+    linhas: list[list[str]] = []
+    for indice in range(1, max(grade, default=0) + 1):
+        colunas = grade.get(indice, {})
+        if not colunas:
+            linhas.append([])
+            continue
+        ultima = max(colunas)
+        linhas.append([colunas.get(numero, "") for numero in range(1, ultima + 1)])
+    return linhas
+
+
+def _numero_planilha(valor: str) -> float:
+    texto = (valor or "").strip()
+    if not texto:
+        return 0.0
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    return round(float(texto), 2)
+
+
+def _data_planilha(valor: str) -> date | None:
+    texto = (valor or "").strip()
+    if not texto:
+        return None
+    try:
+        serial = float(texto)
+    except ValueError:
+        return data_iso(texto)
+    if serial < 20000 or serial > 80000:
+        return None
+    return date(1899, 12, 30) + timedelta(days=int(serial))
+
+
+def tipo_planilha_next(linhas: list[list[str]], nome_arquivo: str = "") -> str | None:
+    texto = " ".join(" ".join(linha) for linha in linhas[:8]).casefold()
+    arquivo = nome_arquivo.casefold()
+    if "contas a pagar" in texto or "pagar" in arquivo:
+        return "pagar"
+    if "contas a receber" in texto or "receber" in arquivo:
+        return "receber"
+    return None
+
+
+def lancamentos_da_planilha(linhas: list[list[str]]) -> list[dict]:
+    cabecalho = -1
+    for indice, linha in enumerate(linhas):
+        if linha and linha[0].strip().casefold() == "código":
+            cabecalho = indice
+            break
+    if cabecalho < 0:
+        return []
+    registros: list[dict] = []
+    for linha in linhas[cabecalho + 1 :]:
+        if not linha or not linha[0].strip():
+            continue
+        while len(linha) < 8:
+            linha.append("")
+        codigo = linha[0].strip()
+        if not codigo.isdigit():
+            continue
+        registros.append(
+            {
+                "codigo": codigo,
+                "duplicata": linha[1].strip() or None,
+                "vencimento": _data_planilha(linha[2]),
+                "nome": linha[3].strip() or None,
+                "historico": linha[4].strip() or None,
+                "data_pagamento": _data_planilha(linha[5]),
+                "valor_baixa": _numero_planilha(linha[6]),
+                "valor_liquido": _numero_planilha(linha[7]),
+            }
+        )
+    return registros
+
+
+def garantir_next() -> None:
+    if st.session_state.get("next_schema_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS next_lancamento (
+                    id bigserial PRIMARY KEY,
+                    tipo text NOT NULL,
+                    codigo text,
+                    duplicata text,
+                    vencimento date,
+                    nome text,
+                    historico text,
+                    data_pagamento date,
+                    valor_baixa double precision,
+                    valor_liquido double precision,
+                    origem_arquivo text,
+                    importado_em timestamptz NOT NULL DEFAULT now(),
+                    quitado text NOT NULL DEFAULT 'Nao',
+                    valor_pago double precision NOT NULL DEFAULT 0,
+                    obs_conta text,
+                    juros double precision,
+                    multa double precision
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS next_lancamento_tipo_vencimento
+                ON next_lancamento (tipo, vencimento)
+                """
+            )
+        )
+        for coluna, tipo_coluna in (
+            ("quitado", "text NOT NULL DEFAULT 'Nao'"),
+            ("valor_pago", "double precision NOT NULL DEFAULT 0"),
+            ("obs_conta", "text"),
+            ("juros", "double precision"),
+            ("multa", "double precision"),
+        ):
+            conn.execute(
+                text(f"ALTER TABLE next_lancamento ADD COLUMN IF NOT EXISTS {coluna} {tipo_coluna}")
+            )
+    st.session_state.next_schema_ok = True
+
+
+def gravar_lancamentos_next(tipo: str, registros: list[dict], origem: str) -> int:
+    garantir_next()
+    with engine().begin() as conn:
+        anteriores = conn.execute(
+            text(
+                """
+                SELECT codigo, duplicata, vencimento, quitado, valor_pago,
+                       data_pagamento, obs_conta, juros, multa
+                FROM next_lancamento
+                WHERE tipo = :tipo
+                """
+            ),
+            {"tipo": tipo},
+        ).mappings().all()
+        guardados = []
+        for antigo in anteriores:
+            pago = float(antigo["valor_pago"] or 0)
+            quitado = str(antigo["quitado"] or "").strip().casefold()
+            observacao = str(antigo["obs_conta"] or "").strip()
+            if quitado == "sim" or pago > 0 or observacao or antigo["juros"] or antigo["multa"]:
+                guardados.append(dict(antigo))
+        conn.execute(text("DELETE FROM next_lancamento WHERE tipo = :tipo"), {"tipo": tipo})
+        if registros:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO next_lancamento (
+                        tipo, codigo, duplicata, vencimento, nome, historico,
+                        data_pagamento, valor_baixa, valor_liquido, origem_arquivo
+                    ) VALUES (
+                        :tipo, :codigo, :duplicata, :vencimento, :nome, :historico,
+                        :data_pagamento, :valor_baixa, :valor_liquido, :origem
+                    )
+                    """
+                ),
+                [{**registro, "tipo": tipo, "origem": origem} for registro in registros],
+            )
+        for antigo in guardados:
+            conn.execute(
+                text(
+                    """
+                    UPDATE next_lancamento
+                    SET quitado = :quitado,
+                        valor_pago = :valor_pago,
+                        data_pagamento = :data_pagamento,
+                        obs_conta = :obs_conta,
+                        juros = :juros,
+                        multa = :multa
+                    WHERE tipo = :tipo
+                      AND codigo = :codigo
+                      AND COALESCE(duplicata, '') = COALESCE(:duplicata, '')
+                      AND vencimento IS NOT DISTINCT FROM :vencimento
+                    """
+                ),
+                {**antigo, "tipo": tipo},
+            )
+        registrar_log(
+            "Importação",
+            f"Subiu {len(registros)} lançamentos de contas a {tipo} a partir de {origem}.",
+            modulo=MODULO_PV,
+            conn=conn,
+        )
+    st.cache_data.clear()
+    return len(registros)
+
+
+def importar_arquivo_next(conteudo: bytes, nome: str) -> tuple[str, int]:
+    linhas = ler_primeira_aba(conteudo)
+    tipo = tipo_planilha_next(linhas, nome)
+    if tipo is None:
+        raise ValueError("A planilha precisa ser de contas a pagar ou de contas a receber.")
+    registros = lancamentos_da_planilha(linhas)
+    if not registros:
+        raise ValueError("Nenhum lançamento encontrado nessa planilha.")
+    return tipo, gravar_lancamentos_next(tipo, registros, nome)
+
+
+def arquivos_pasta_next() -> list[tuple[str, Path]]:
+    if not PASTA_PLANILHAS_NEXT.is_dir():
+        return []
+    encontrados: list[tuple[str, Path]] = []
+    for arquivo in sorted(PASTA_PLANILHAS_NEXT.glob("*.xlsx")):
+        tipo = tipo_planilha_next([], arquivo.name)
+        if tipo:
+            encontrados.append((tipo, arquivo))
+    return encontrados
+
+
+def subir_pasta_next() -> list[str]:
+    avisos: list[str] = []
+    for tipo, arquivo in arquivos_pasta_next():
+        quantidade = importar_arquivo_next(arquivo.read_bytes(), arquivo.name)[1]
+        nome = "Contas a pagar" if tipo == "pagar" else "Contas a receber"
+        avisos.append(f"{nome}: {inteiro(quantidade)} lançamentos de {arquivo.name}.")
+    return avisos
+
+
+def lancamentos_next(tipo: str) -> pd.DataFrame:
+    garantir_next()
+    return query(
         """
+        SELECT codigo, duplicata, vencimento, nome, historico,
+               data_pagamento, valor_baixa, valor_liquido, importado_em
+        FROM next_lancamento
+        WHERE tipo = ?
+        ORDER BY CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END, vencimento, codigo
+        """,
+        (tipo,),
+    )
+
+
+def cabecalho_modulo() -> None:
+    logo, titulo, sair = st.columns([1, 4, 1], vertical_alignment="center")
+    with logo:
+        mostrar_logo(92)
+    with titulo:
+        st.title(TITULO)
+    with sair:
+        if st.button("Menu", width="stretch", key="voltar_menu"):
+            st.session_state.modulo = None
+            st.rerun()
+        if st.button("Sair", width="stretch", key="sair_topo"):
+            encerrar_sessao()
+
+
+def lateral_modulo(usuario: dict, texto: str, legenda: str | None = None) -> None:
+    with st.sidebar:
+        mostrar_logo(150)
+        st.header(TITULO)
+        st.write(usuario["nome"])
+        if usuario["administrador"]:
+            st.caption("Administrador")
+        st.write(texto)
+        if st.button("Sair", width="stretch", key="sair_menu"):
+            encerrar_sessao()
+        if st.button("Atualizar dados", width="stretch", key="atualizar_dados"):
+            st.cache_data.clear()
+            st.rerun()
+        if legenda:
+            st.caption(legenda)
+
+
+def clausula_pesquisa_next(termo: str, params: list) -> str:
+    termos = termos_busca(termo)
+    if not termos:
+        return ""
+    partes = []
+    for campo in ("codigo", "duplicata", "nome", "historico", "obs_conta"):
+        for item in termos:
+            partes.append(comparar_busca(campo))
+            params.append(like(item))
+    return " AND (" + " OR ".join(partes) + ")"
+
+
+def limpar_pesquisa_next(tipo: str) -> None:
+    st.session_state[f"next_termo_{tipo}"] = ""
+    st.session_state[f"next_termo_campo_{tipo}"] = ""
+
+
+def pesquisa_next(tipo: str) -> str:
+    with st.form(f"pesquisa_next_{tipo}", border=True):
+        campo, acao = st.columns([4, 1], vertical_alignment="bottom")
+        termo_digitado = campo.text_input(
+            "Pesquisar por código, duplicata, nome ou histórico",
+            key=f"next_termo_campo_{tipo}",
+            placeholder="Código, duplicata, nome ou histórico",
+            persist_state="session",
+        )
+        pesquisou = acao.form_submit_button("Pesquisar", type="primary", width="stretch")
+    if pesquisou:
+        st.session_state[f"next_termo_{tipo}"] = str(termo_digitado or "").strip()
+    termo = str(st.session_state.get(f"next_termo_{tipo}", "")).strip()
+    if termo:
+        st.caption(f"Pesquisa ativa: {termo}")
+        st.button(
+            "Limpar pesquisa",
+            key=f"limpar_pesquisa_next_{tipo}",
+            on_click=limpar_pesquisa_next,
+            args=(tipo,),
+        )
+    return termo
+
+
+def texto_lembrete_next() -> str:
+    aviso = f"NENHUMA BAIXA NOS ÚLTIMOS {DIAS_EDICAO_BAIXA} DIAS."
+    ultima = scalar(
+        """
+        SELECT MAX(substr(CAST(data_pagamento AS TEXT), 1, 10))
+        FROM next_lancamento
+        WHERE lower(IFNULL(quitado, '')) = 'sim'
+          AND substr(CAST(data_pagamento AS TEXT), 1, 10) <> ''
+        """
+    )
+    if not ultima:
+        return aviso
+    quando = pd.to_datetime(str(ultima)[:10], errors="coerce")
+    if pd.isna(quando):
+        return aviso
+    dias = (date.today() - quando.date()).days
+    if dias >= DIAS_EDICAO_BAIXA:
+        return aviso
+    if dias <= 0:
+        return "Última baixa hoje."
+    if dias == 1:
+        return "Última baixa a 1 dia."
+    return f"Última baixa a {dias} dias."
+
+
+def mostrar_lembrete_next() -> None:
+    texto = html.escape(texto_lembrete_next())
+    st.markdown(
+        "<p style='text-align:center;font-weight:700;font-size:1.05rem;margin:0.15rem 0 0.7rem'>"
+        f"{texto}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def _baixa_pela_linha(chave_ids: str, chave_click: str, reabrir: bool) -> None:
+    click = st.session_state.get(chave_click)
+    ids = list(st.session_state.get(chave_ids) or [])
+    if click is None:
+        return
+    try:
+        indice = click.row
+    except AttributeError:
+        indice = click["row"]
+    if isinstance(indice, int) and 0 <= indice < len(ids):
+        abrir_baixa_next(int(ids[indice]), reabrir)
+
+
+def click_baixar_vencidas() -> None:
+    _baixa_pela_linha("nx_ids_vencidas", "nx_click_baixar_vencidas", False)
+
+
+def click_baixar_avencer() -> None:
+    _baixa_pela_linha("nx_ids_avencer", "nx_click_baixar_avencer", False)
+
+
+def click_baixar_notas() -> None:
+    _baixa_pela_linha("nx_ids_notas", "nx_click_baixar_notas", False)
+    fechar_notas_cliente()
+
+
+def click_reabrir_next() -> None:
+    _baixa_pela_linha("nx_ids_recentes", "nx_click_reabrir", True)
+
+
+def titulo_central(texto: str) -> None:
+    st.markdown(
+        "<h3 style='text-align:center;margin:0.15rem 0 0.45rem'>"
+        f"{html.escape(texto)}</h3>",
+        unsafe_allow_html=True,
+    )
+
+
+def nome_lista_next(tipo: str, vencida: bool) -> str:
+    if tipo == "pagar":
+        return "Contas a pagar vencidas" if vencida else "Contas a pagar a vencer"
+    return "Contas a receber vencidas" if vencida else "Contas a vencer não vencidas"
+
+
+def _contas_com_divida(contas: pd.DataFrame) -> pd.DataFrame:
+    if contas.empty:
+        return contas
+    trabalho = contas.copy()
+    if "cliente" not in trabalho.columns:
+        trabalho["cliente"] = trabalho.get("descricao", "")
+    trabalho["cliente"] = trabalho["cliente"].map(lambda valor: texto_limpo(valor) or "Sem identificação")
+    trabalho["chave"] = trabalho["cliente"].map(sem_acento)
+    vencimento = pd.to_datetime(trabalho["vencimento"], errors="coerce")
+    trabalho["eh_vencida"] = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
+    juros = trabalho["juros"] if "juros" in trabalho.columns else pd.Series(0, index=trabalho.index)
+    multa = trabalho["multa"] if "multa" in trabalho.columns else pd.Series(0, index=trabalho.index)
+    trabalho["divida"] = [
+        valor_divida_exibida(valor, pago, juro, multa_valor)
+        for valor, pago, juro, multa_valor in zip(
+            trabalho["valor"], trabalho["valor_pago"], juros, multa, strict=True
+        )
+    ]
+    return trabalho
+
+
+def abrir_notas_cliente() -> None:
+    click = st.session_state.get("nx_cli_click")
+    if click is None:
+        return
+    ordem = list(st.session_state.get("nx_cli_ordem") or [])
+    rotulos = list(st.session_state.get("nx_cli_rotulos") or [])
+    nomes = list(st.session_state.get("nx_cli_nomes") or [])
+    try:
+        rotulo = click.label
+        indice = click.row
+    except AttributeError:
+        rotulo = click["label"]
+        indice = click["row"]
+    escolhido = None
+    if isinstance(rotulo, str) and rotulos.count(rotulo) == 1:
+        escolhido = rotulos.index(rotulo)
+    elif isinstance(indice, int) and 0 <= indice < len(ordem):
+        escolhido = indice
+    if escolhido is None:
+        return
+    st.session_state.nx_cli_cliente = ordem[escolhido]
+    st.session_state.nx_cli_nome = nomes[escolhido] if escolhido < len(nomes) else ordem[escolhido]
+
+
+def fechar_notas_cliente() -> None:
+    st.session_state.nx_cli_cliente = None
+    st.session_state.nx_cli_nome = None
+
+
+@st.dialog("Notas em aberto", width="large", on_dismiss=fechar_notas_cliente)
+def dialogo_notas_cliente() -> None:
+    chave = st.session_state.get("nx_cli_cliente")
+    base = st.session_state.get("nx_notas_base")
+    if not chave or base is None or getattr(base, "empty", True):
+        return
+    nome = st.session_state.get("nx_cli_nome") or chave
+    linhas = base[base["chave"] == chave].copy()
+    st.subheader(nome)
+    if linhas.empty:
+        st.info("Este cliente não tem notas em aberto.")
+        return
+    vencido = float(linhas.loc[linhas["eh_vencida"], "divida"].sum())
+    a_vencer = float(linhas.loc[~linhas["eh_vencida"], "divida"].sum())
+    st.caption(
+        f"{inteiro(len(linhas))} notas em aberto. "
+        f"Vencidas: {brl(vencido)}. A vencer: {brl(a_vencer)}."
+    )
+    st.session_state.nx_ids_notas = [int(valor) for valor in linhas["id"].tolist()]
+    visivel = pd.DataFrame(
+        {
+            "Código": linhas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Descrição": linhas["descricao"].map(lambda valor: texto_limpo(valor) or "—")
+            if "descricao" in linhas.columns
+            else "—",
+            "Vencimento": linhas["vencimento"].map(lambda valor: data_br(valor) or "—"),
+            "Situação": ["Vencida" if flag else "A vencer" for flag in linhas["eh_vencida"]],
+            "Valor": linhas["divida"],
+            "Baixar": ["Baixar"] * len(linhas),
+        }
+    )
+    st.dataframe(
+        visivel,
+        width="stretch",
+        hide_index=True,
+        height=min(420, max(160, 48 + len(visivel) * 35)),
+        column_config={
+            "Código": st.column_config.TextColumn("Código", width="small"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+            "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
+            "Situação": st.column_config.TextColumn("Situação", width="small"),
+            "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
+            "Baixar": st.column_config.ButtonColumn(
+                "Baixar",
+                type="primary",
+                width="small",
+                on_click=click_baixar_notas,
+                key="nx_click_baixar_notas",
+            ),
+        },
+        alt=f"Notas em aberto de {nome}",
+    )
+
+
+def mostrar_totais_cliente(contas: pd.DataFrame) -> None:
+    trabalho = _contas_com_divida(contas)
+    st.session_state.nx_notas_base = trabalho
+    if trabalho.empty:
+        st.info("Nenhuma conta em aberto para esse cliente.")
+        return
+    trabalho = trabalho.copy()
+    trabalho["vencido"] = trabalho["divida"].where(trabalho["eh_vencida"], 0.0)
+    trabalho["a_vencer"] = trabalho["divida"].where(~trabalho["eh_vencida"], 0.0)
+    resumo = (
+        trabalho.groupby("chave", as_index=False)
+        .agg(
+            cliente=("cliente", nome_do_grupo),
+            vencido=("vencido", "sum"),
+            a_vencer=("a_vencer", "sum"),
+            notas=("id", "count"),
+        )
+        .sort_values(["vencido", "a_vencer", "cliente"], ascending=[False, False, True])
+    )
+    t1, t2 = st.columns(2)
+    t1.metric("Valor vencido", brl(resumo["vencido"].sum()))
+    t2.metric("Valor a vencer", brl(resumo["a_vencer"].sum()))
+    grade = resumo[["cliente", "vencido", "a_vencer"]].copy()
+    rotulos = [f"{int(qtd)} notas" for qtd in resumo["notas"]]
+    grade["notas"] = rotulos
+    st.session_state.nx_cli_ordem = resumo["chave"].tolist()
+    st.session_state.nx_cli_rotulos = rotulos
+    st.session_state.nx_cli_nomes = resumo["cliente"].tolist()
+
+    def cor_cliente(linha):
+        tinta = VERMELHO if valor_banco(linha["vencido"]) > 0 else AZUL
+        return ["" if coluna == "notas" else tinta for coluna in linha.index]
+
+    st.dataframe(
+        grade.style.apply(cor_cliente, axis=1),
+        width="stretch",
+        hide_index=True,
+        height=min(420, max(160, 48 + len(grade) * 35)),
+        column_config={
+            "cliente": st.column_config.TextColumn("Cliente", width="medium"),
+            "vencido": st.column_config.NumberColumn("Vencidas", format="R$ %.2f", width="small"),
+            "a_vencer": st.column_config.NumberColumn("A vencer", format="R$ %.2f", width="small"),
+            "notas": st.column_config.ButtonColumn(
+                "Notas em aberto",
+                type="primary",
+                width="small",
+                help="Quantidade de notas em aberto e o valor de cada uma",
+                on_click=abrir_notas_cliente,
+                key="nx_cli_click",
+            ),
+        },
+        alt="Totais do cliente em contas vencidas e a vencer",
+    )
+    if st.session_state.get("nx_cli_cliente"):
+        dialogo_notas_cliente()
+
+
+def listar_next_abertas(
+    contas: pd.DataFrame,
+    *,
+    chave_ids: str,
+    chave_click: str,
+    ao_clicar,
+    alt: str,
+    vermelho: bool = False,
+) -> None:
+    st.session_state[chave_ids] = [int(valor) for valor in contas["id"].tolist()]
+    visivel = pd.DataFrame(
+        {
+            "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Vencimento": contas["vencimento"].map(lambda valor: data_br(valor) or "—"),
+            "Dias vencidos": [
+                dias_em_atraso(vencimento, quitado)
+                for vencimento, quitado in zip(contas["vencimento"], contas["quitado"], strict=True)
+            ],
+            "Valor da dívida": [
+                valor_divida_exibida(valor, pago, juros, multa)
+                for valor, pago, juros, multa in zip(
+                    contas["valor"],
+                    contas["valor_pago"],
+                    contas["juros"] if "juros" in contas.columns else [0] * len(contas),
+                    contas["multa"] if "multa" in contas.columns else [0] * len(contas),
+                    strict=True,
+                )
+            ],
+            "Baixar": ["Baixar"] * len(contas),
+        }
+    )
+    tabela = pintar_faixa(visivel, VERMELHO, {"Baixar"}) if vermelho else visivel
+    st.dataframe(
+        tabela,
+        width="stretch",
+        hide_index=True,
+        height=min(480, max(160, 48 + len(contas) * 35)),
+        column_config={
+            "Código": st.column_config.TextColumn("Código", width="small"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+            "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
+            "Dias vencidos": st.column_config.NumberColumn("Dias vencidos", format="%d", width="small"),
+            "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
+            "Baixar": st.column_config.ButtonColumn(
+                "Baixar",
+                type="primary",
+                width="small",
+                on_click=ao_clicar,
+                key=chave_click,
+            ),
+        },
+        alt=alt,
+    )
+
+
+def listar_next_recentes(contas: pd.DataFrame) -> None:
+    st.session_state.nx_ids_recentes = [int(valor) for valor in contas["id"].tolist()]
+    visivel = pd.DataFrame(
+        {
+            "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
+            "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
+            "Reabrir baixa": ["Reabrir baixa"] * len(contas),
+        }
+    )
+    st.dataframe(
+        visivel,
+        width="stretch",
+        hide_index=True,
+        height=420,
+        column_config={
+            "Código": st.column_config.TextColumn("Código"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+            "Pagamento": st.column_config.TextColumn("Pagamento"),
+            "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f"),
+            "Reabrir baixa": st.column_config.ButtonColumn(
+                "Reabrir baixa",
+                type="primary",
+                width="medium",
+                on_click=click_reabrir_next,
+                key="nx_click_reabrir",
+            ),
+        },
+        alt="Baixas recentes do Next",
+    )
+
+
+def abrir_baixa_next(conta_id: int, reabrir: bool = False) -> None:
+    st.session_state.next_baixa_id = int(conta_id)
+    st.session_state.next_baixa_reabrir = bool(reabrir)
+    st.session_state.next_baixa_init = None
+
+
+def fechar_baixa_next() -> None:
+    st.session_state.next_baixa_id = None
+    st.session_state.next_baixa_reabrir = False
+
+
+def buscar_next(conta_id: int) -> pd.Series | None:
+    frame = query(
+        """
+        SELECT id,
+               codigo AS os,
+               codigo,
+               COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), '')) AS nome,
+               quitado,
+               vencimento,
+               valor_liquido AS valor,
+               COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento,
+               obs_conta,
+               duplicata AS parcela,
+               COALESCE(NULLIF(TRIM(historico), ''), NULLIF(TRIM(nome), '')) AS descricao,
+               tipo,
+               juros,
+               multa
+        FROM next_lancamento
+        WHERE id = ?
+        """,
+        (int(conta_id),),
+    )
+    if frame.empty:
+        return None
+    return frame.iloc[0]
+
+
+def _sync_data_next(conta_id: int) -> None:
+    pago = valor_banco(st.session_state.get(f"nx_pago_{conta_id}"))
+    if pago > 0 and st.session_state.get(f"nx_data_{conta_id}") is None:
+        st.session_state[f"nx_data_{conta_id}"] = date.today()
+
+
+def _conta_a_pagar(linha: pd.Series) -> bool:
+    return str(linha.get("tipo", "")).strip().casefold() == "pagar"
+
+
+def _recalcular_next(conta_id: int, saldo: float, dias: int | None, aplicar_juros: bool = True) -> None:
+    juros, multa = encargos_legais(saldo, dias)
+    st.session_state[f"nx_juros_{conta_id}"] = juros if aplicar_juros else 0.0
+    st.session_state[f"nx_multa_{conta_id}"] = multa
+
+
+def _preparar_baixa_next(conta_id: int, linha: pd.Series, reabrir: bool) -> None:
+    if st.session_state.get("next_baixa_init") == conta_id:
+        return
+    juros, multa, tem_salvo = _encargos_salvos(linha)
+    dias = dias_em_atraso(linha["vencimento"], "Nao" if reabrir else linha["quitado"])
+    saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
+    if not tem_salvo:
+        juros, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
+    if _conta_a_pagar(linha):
+        juros = 0.0
+    obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    st.session_state[f"nx_juros_{conta_id}"] = float(juros)
+    st.session_state[f"nx_multa_{conta_id}"] = float(multa)
+    st.session_state[f"nx_obs_{conta_id}"] = obs
+    st.session_state[f"nx_pago_{conta_id}"] = float(valor_banco(linha["valor_pago"]) if reabrir else 0.0)
+    st.session_state[f"nx_data_{conta_id}"] = data_iso(linha["dt_pagamento"]) if reabrir else None
+    st.session_state.next_baixa_init = conta_id
+
+
+def _totais_next(linha: pd.Series, conta_id: int, reabrir: bool) -> tuple[float, float, float, float]:
+    juros = 0.0 if _conta_a_pagar(linha) else valor_banco(st.session_state.get(f"nx_juros_{conta_id}"))
+    multa = valor_banco(st.session_state.get(f"nx_multa_{conta_id}"))
+    pago_campo = valor_banco(st.session_state.get(f"nx_pago_{conta_id}"))
+    ja_pago = valor_banco(linha["valor_pago"])
+    pago_total = pago_campo if reabrir else round(ja_pago + pago_campo, 2)
+    devido = round(valor_banco(linha["valor"]) + juros + multa, 2)
+    return juros, multa, pago_total, devido
+
+
+def gravar_next_baixa(
+    conta_id: int,
+    *,
+    pago: float,
+    juros: float,
+    multa: float,
+    quando: date | None,
+    obs: str,
+    quitar: bool,
+) -> None:
+    pagamento = None if quando is None else quando.isoformat()
+    quitado = "Sim" if quitar else "Nao"
+    with engine().begin() as conn:
+        antes = conn.execute(
+            text(
+                """
+                SELECT codigo, nome, historico
+                FROM next_lancamento
+                WHERE id = :id
+                """
+            ),
+            {"id": int(conta_id)},
+        ).mappings().first()
+        if antes is None:
+            return
+        conn.execute(
+            text(
+                """
+                UPDATE next_lancamento
+                SET quitado = :quitado,
+                    data_pagamento = :pagamento,
+                    valor_pago = :pago,
+                    obs_conta = :obs,
+                    juros = :juros,
+                    multa = :multa
+                WHERE id = :id
+                """
+            ),
+            {
+                "quitado": quitado,
+                "pagamento": pagamento,
+                "pago": round(pago, 2),
+                "obs": obs,
+                "juros": round(juros, 2),
+                "multa": round(multa, 2),
+                "id": int(conta_id),
+            },
+        )
+        codigo = texto_banco(antes["codigo"]) or "sem código"
+        cliente = texto_banco(antes["nome"]) or texto_banco(antes["historico"]) or "sem nome"
+        situacao = "quitada" if quitar else "parcial"
+        registrar_log(
+            "Baixa",
+            (
+                f"Código {codigo}, {cliente}, lançamento {int(conta_id)}: baixa {situacao}, "
+                f"valor pago {brl(pago)}, juros {brl(juros)}, multa {brl(multa)}, "
+                f"pagamento em {data_br(pagamento) or 'sem data'}."
+            ),
+            modulo=MODULO_PV,
+            conn=conn,
+        )
+
+
+def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: bool) -> None:
+    juros, multa, pago_total, devido = _totais_next(linha, conta_id, reabrir)
+    pago_campo = valor_banco(st.session_state.get(f"nx_pago_{conta_id}"))
+    quando = data_iso(st.session_state.get(f"nx_data_{conta_id}"))
+    if quitar and pago_total + 0.004 < devido:
+        complemento = "multa" if _conta_a_pagar(linha) else "juros e multa"
+        st.error(f"A baixa só é concluída quando o valor pago é igual ou maior que a dívida com {complemento}.")
+        return
+    if not quitar and pago_total + 0.004 >= devido:
+        st.error("A baixa parcial fica para um valor menor que o total para quitação.")
+        return
+    if not quitar and not reabrir and pago_campo <= 0:
+        st.error("Informe o valor pago nesta baixa parcial.")
+        return
+    if pago_total > 0 and quando is None:
+        st.error("Informe a data do pagamento.")
+        return
+    obs = texto_banco(st.session_state.get(f"nx_obs_{conta_id}"))
+    gravar_next_baixa(
+        conta_id,
+        pago=pago_total,
+        juros=juros,
+        multa=multa,
+        quando=quando,
+        obs=obs,
+        quitar=quitar,
+    )
+    st.session_state.next_baixa_aviso = 1
+    st.session_state.next_baixa_aviso_texto = (
+        "Baixa registrada. A conta foi quitada." if quitar else "Baixa parcial registrada. A conta continua em aberto."
+    )
+    fechar_baixa_next()
+    st.cache_data.clear()
+    st.rerun()
+
+
+def _ficha_next(linha: pd.Series, dias: int | None) -> None:
+    pares = [
+        ("Cliente", texto_limpo(linha["nome"]) or "—"),
+        ("Código", texto_limpo(linha["codigo"]) or "—"),
+        ("Descrição", texto_limpo(linha["descricao"]) or "—"),
+        ("Parcela", texto_limpo(linha["parcela"]) or "—"),
+        ("Vencimento", data_br(linha["vencimento"]) or "—"),
+        ("Dias vencidos", str(dias) if dias else "—"),
+        ("Valor original", brl(linha["valor"])),
+        ("Já pago", brl(linha["valor_pago"])),
+    ]
+    linhas = "".join(_linha_doc(rotulo, valor) for rotulo, valor in pares)
+    st.html(
+        "<style>.ficha-baixa th,.ficha-baixa td{border:1px solid #d5e4ee;padding:6px 8px;font-size:14px;text-align:left}"
+        ".ficha-baixa{width:100%;border-collapse:collapse}.ficha-baixa th{width:34%;background:#f4f8fb}</style>"
+        f"<table class='ficha-baixa'>{linhas}</table>"
+    )
+
+
+@st.dialog("Baixa da conta", width="large", on_dismiss=fechar_baixa_next)
+def dialogo_baixa_next() -> None:
+    conta_id = st.session_state.get("next_baixa_id")
+    if not conta_id:
+        return
+    linha = buscar_next(int(conta_id))
+    if linha is None:
+        st.warning("Esta conta não está mais no Next.")
+        return
+    reabrir = bool(st.session_state.get("next_baixa_reabrir"))
+    _preparar_baixa_next(int(conta_id), linha, reabrir)
+    if reabrir:
+        st.subheader("Reabrir baixa")
+    dias = dias_em_atraso(linha["vencimento"], "Nao")
+    _ficha_next(linha, dias)
+    saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
+    base_legal = valor_banco(linha["valor"]) if reabrir else saldo
+    pagar = _conta_a_pagar(linha)
+    juros_lei, multa_lei = encargos_legais(base_legal, dias)
+    if pagar:
+        st.caption(
+            "Contas a pagar não recebem juros. A multa sugerida pode ser alterada antes de salvar. "
+            f"Sugestão para {dias or 0} dia(s): multa {brl(multa_lei)}."
+        )
+        j1, j2 = st.columns([1, 1], vertical_alignment="bottom")
+        j1.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
+        j2.button(
+            "Recalcular pela lei",
+            key=f"nx_recalc_{conta_id}",
+            on_click=_recalcular_next,
+            args=(int(conta_id), base_legal, dias, False),
+            width="stretch",
+        )
+    else:
+        st.caption(
+            "Multa de 2% sobre o saldo vencido, uma vez (Código de Defesa do Consumidor, art. 52, § 1º). "
+            "Juros de mora de 1% ao mês, proporcionais aos dias (mês de 30 dias), teto usual da relação de consumo "
+            "quando não há índice contratado. Os valores sugeridos podem ser alterados antes de salvar. "
+            f"Sugestão para {dias or 0} dia(s): juros {brl(juros_lei)} e multa {brl(multa_lei)}."
+        )
+        j1, j2, j3 = st.columns([1, 1, 1], vertical_alignment="bottom")
+        j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"nx_juros_{conta_id}")
+        j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
+        j3.button(
+            "Recalcular pela lei",
+            key=f"nx_recalc_{conta_id}",
+            on_click=_recalcular_next,
+            args=(int(conta_id), base_legal, dias, True),
+            width="stretch",
+        )
+    rotulo_pago = "Valor pago" if reabrir else "Valor pago nesta baixa"
+    p1, p2 = st.columns(2)
+    p1.number_input(
+        rotulo_pago,
+        min_value=0.0,
+        step=0.01,
+        format="%.2f",
+        key=f"nx_pago_{conta_id}",
+        on_change=_sync_data_next,
+        args=(int(conta_id),),
+    )
+    p2.date_input("Data do pagamento", format="DD/MM/YYYY", key=f"nx_data_{conta_id}")
+    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=80)
+    juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
+    restante = round(max(0.0, devido - pago_total), 2)
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Total para quitação", brl(devido))
+    r2.metric("Valor pago acumulado", brl(pago_total))
+    r3.metric("Valor restante", brl(restante))
+    pode_quitar = pago_total + 0.004 >= devido and pago_total > 0
+    pode_parcial = pago_total + 0.004 < devido and (
+        valor_banco(st.session_state.get(f"nx_pago_{conta_id}")) > 0 or reabrir
+    )
+    b1, b2 = st.columns(2)
+    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"nx_salvar_{conta_id}", disabled=not pode_quitar):
+        _salvar_baixa_next(linha, int(conta_id), reabrir, True)
+    if b2.button("Salvar baixa parcial", width="stretch", key=f"nx_parcial_{conta_id}", disabled=not pode_parcial):
+        _salvar_baixa_next(linha, int(conta_id), reabrir, False)
+    if not pode_quitar:
+        st.caption("A baixa integral só fica disponível quando o valor pago é igual ou maior que o total para quitação.")
+    quando = data_iso(st.session_state.get(f"nx_data_{conta_id}"))
+    obs = texto_banco(st.session_state.get(f"nx_obs_{conta_id}"))
+    dados = _dados_documento(linha, juros, multa, pago_total, quando, obs)
+    dados_nota = dict(dados)
+    valor_nota = restante if restante > 0 else devido
+    dados_nota["valor"] = brl(valor_nota)
+    dados_nota["extenso"] = reais_por_extenso(valor_nota)
+    i1, i2 = st.columns(2)
+    if i1.button("Imprimir recibo quitado", width="stretch", key=f"nx_recibo_{conta_id}", disabled=not pode_quitar):
+        disparar_impressao(html_recibo(dados))
+    if i2.button("Imprimir nota promissória", width="stretch", key=f"nx_nota_{conta_id}"):
+        disparar_impressao(html_promissoria(dados_nota))
+
+
+def tabela_next(frame: pd.DataFrame, tipo: str) -> None:
+    if frame.empty:
+        st.info("Nenhuma conta encontrada com esses filtros.")
+        return
+    visivel = format_frame(com_dias_vencidos(frame))
+    config = column_config(list(visivel.columns))
+    tabela = pintar_nao_pagas(visivel) if "quitado" in visivel.columns else visivel
+    st.dataframe(
+        tabela,
+        width="stretch",
+        hide_index=True,
+        height=560,
+        column_config=config,
+        alt="Contas do Next",
+    )
+    st.download_button(
+        "Baixar CSV deste resultado",
+        data=visivel.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"next_{tipo}.csv",
+        mime="text/csv",
+        key=f"download_next_{tipo}",
+    )
+
+
+def botoes_financeiro_next() -> str:
+    st.session_state.setdefault("next_fin_lista", "receber")
+    ativa = st.session_state.next_fin_lista
+    if ativa not in {"receber", "pagar"}:
+        ativa = "receber"
+        st.session_state.next_fin_lista = ativa
+    marca = "btn_next_receber" if ativa == "receber" else "btn_next_pagar"
+    st.html(
+        f"""
         <style>
-        .st-key-capa_pv h1 {
-          text-align: center;
-          color: #0c6b4d;
-          font-weight: 700;
-        }
-        .st-key-capa_pv [data-testid="stAlert"] {
-          text-align: center;
-        }
+        .st-key-menu_next_fin,
+        .st-key-menu_next_fin [data-testid="stHorizontalBlock"] {{
+          width: 100%;
+          justify-content: center !important;
+        }}
+        .st-key-menu_next_fin button {{
+          background-color: #0c6b4d !important;
+          color: #f4fbf7 !important;
+          border: 1px solid #084a36 !important;
+          border-radius: 999px !important;
+          box-shadow: 0 8px 18px rgba(12, 107, 77, 0.34) !important;
+          font-weight: 600 !important;
+          padding: 0.45rem 0.95rem !important;
+        }}
+        .st-key-menu_next_fin button:hover {{
+          background-color: #14845f !important;
+        }}
+        .st-key-menu_next_fin .st-key-{marca} button,
+        .st-key-menu_next_fin .st-key-{marca} button:hover {{
+          background-color: #c4a35a !important;
+          color: #1a2e28 !important;
+          border-color: #a8883e !important;
+          box-shadow: 0 10px 22px rgba(196, 163, 90, 0.45) !important;
+        }}
         </style>
         """
     )
-    with st.container(key="capa_pv", horizontal_alignment="center"):
-        mostrar_logo(200)
-        st.title(MODULO_PV)
-        st.info("Este módulo está em construção.")
-        if st.button("Menu", key="voltar_menu_pv"):
-            st.session_state.modulo = None
-            st.rerun()
+    with st.container(
+        key="menu_next_fin",
+        horizontal=True,
+        horizontal_alignment="center",
+        vertical_alignment="center",
+        gap="small",
+    ):
+        if st.button("Contas a receber", key="btn_next_receber", type="primary"):
+            if ativa != "receber":
+                st.session_state.next_fin_lista = "receber"
+                st.rerun()
+        if st.button("Contas a pagar", key="btn_next_pagar", type="primary"):
+            if ativa != "pagar":
+                st.session_state.next_fin_lista = "pagar"
+                st.rerun()
+    return ativa
 
 
-def menu_principal(abas: list[str]) -> None:
-    ativa = st.session_state.aba
+def painel_contas_next() -> None:
+    tipo = botoes_financeiro_next()
+    termo = pesquisa_next("fin")
+    params_busca: list = []
+    filtro = clausula_pesquisa_next(termo, params_busca)
+    limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
+    descricao_sql = "COALESCE(NULLIF(TRIM(historico), ''), NULLIF(TRIM(nome), ''))"
+    recentes = query(
+        f"""
+        SELECT id, codigo, {descricao_sql} AS descricao, vencimento,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento, quitado
+        FROM next_lancamento
+        WHERE tipo = ?
+          AND lower(IFNULL(quitado, '')) = 'sim'
+          AND substr(CAST(data_pagamento AS TEXT), 1, 10) >= ?
+          {filtro}
+        ORDER BY data_pagamento DESC, id DESC
+        """,
+        tuple([tipo, limite_recente, *params_busca]),
+    )
+    mostrar_lembrete_next()
+    abertas = query(
+        f"""
+        SELECT id, codigo, {descricao_sql} AS descricao,
+               COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), ''), 'Sem identificação') AS cliente,
+               vencimento,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               juros, multa, quitado
+        FROM next_lancamento
+        WHERE tipo = ?
+          AND lower(IFNULL(quitado, '')) <> 'sim'
+          {filtro}
+        ORDER BY CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END, vencimento, codigo
+        """,
+        tuple([tipo, *params_busca]),
+    )
+    vencimento = pd.to_datetime(abertas["vencimento"], errors="coerce") if not abertas.empty else pd.Series(dtype="datetime64[ns]")
+    vencidas_mask = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
+    vencidas = abertas.loc[vencidas_mask] if not abertas.empty else abertas
+    a_vencer = abertas.loc[~vencidas_mask] if not abertas.empty else abertas
+    if tipo == "pagar":
+        if not vencidas.empty:
+            vencidas = vencidas.copy()
+            vencidas["juros"] = 0
+        if not a_vencer.empty:
+            a_vencer = a_vencer.copy()
+            a_vencer["juros"] = 0
+
+    def total_lista(contas: pd.DataFrame) -> float:
+        if contas.empty:
+            return 0.0
+        return round(
+            sum(
+                valor_divida_exibida(
+                    registro.valor,
+                    registro.valor_pago,
+                    getattr(registro, "juros", 0),
+                    getattr(registro, "multa", 0),
+                )
+                for registro in contas.itertuples(index=False)
+            ),
+            2,
+        )
+
+    aviso = st.session_state.pop("next_baixa_aviso", None)
+    aviso_texto = st.session_state.pop("next_baixa_aviso_texto", None)
+    if aviso:
+        st.success(aviso_texto or f"{inteiro(aviso)} conta(s) atualizada(s).")
+    elif aviso == 0:
+        st.info("Nenhuma alteração para salvar.")
+
+    if tipo == "receber":
+        st.caption("Na busca, o valor do cliente fica separado em contas vencidas e contas a vencer.")
+        mostrar_totais_cliente(abertas)
+
+    coluna_vencidas, coluna_avencer = st.columns(2, gap="medium")
+    with coluna_vencidas:
+        st.html('<div id="next-vencidas" style="scroll-margin-top:80px"></div>')
+        titulo_central(nome_lista_next(tipo, True))
+        v1, v2 = st.columns(2)
+        v1.metric("Quantidade", inteiro(len(vencidas)))
+        v2.metric("Valor", brl(total_lista(vencidas)))
+        if vencidas.empty:
+            st.info("Nenhuma conta vencida.")
+        else:
+            st.caption("Estas contas já passaram do vencimento e ainda não foram quitadas.")
+            listar_next_abertas(
+                vencidas,
+                chave_ids="nx_ids_vencidas",
+                chave_click="nx_click_baixar_vencidas",
+                ao_clicar=click_baixar_vencidas,
+                alt="Contas vencidas do Next",
+                vermelho=True,
+            )
+    with coluna_avencer:
+        st.html('<div id="next-avencer" style="scroll-margin-top:80px"></div>')
+        titulo_central(nome_lista_next(tipo, False))
+        a1, a2 = st.columns(2)
+        a1.metric("Quantidade", inteiro(len(a_vencer)))
+        a2.metric("Valor", brl(total_lista(a_vencer)))
+        if a_vencer.empty:
+            st.info("Nenhuma conta em aberto por vencer.")
+        else:
+            st.caption("No dia seguinte ao vencimento, se não forem quitadas, passam para a lista vermelha.")
+            listar_next_abertas(
+                a_vencer,
+                chave_ids="nx_ids_avencer",
+                chave_click="nx_click_baixar_avencer",
+                ao_clicar=click_baixar_avencer,
+                alt="Contas a vencer do Next",
+            )
+
+    st.html('<div id="next-recentes" style="scroll-margin-top:80px"></div>')
+    st.subheader("Baixas recentes")
+    st.caption(
+        f"Contas quitadas nos últimos {DIAS_EDICAO_BAIXA} dias. "
+        "Reabrir baixa abre a mesma tela da conta para os ajustes."
+    )
+    if recentes.empty:
+        mostrar_lembrete_next()
+    else:
+        r1, r2 = st.columns(2)
+        r1.metric("Baixas no prazo", inteiro(len(recentes)))
+        r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
+        listar_next_recentes(recentes)
+
+    st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
+    st.subheader("Todas as contas")
+    st.caption(
+        f"Contas recebidas nos últimos {DIAS_EDICAO_BAIXA} dias ficam no topo das recebidas, "
+        "da baixa mais nova para a mais antiga. Depois desse prazo elas seguem a ordem de vencimento."
+    )
+    quadro_quitado = query(
+        """
+        SELECT DISTINCT quitado
+        FROM next_lancamento
+        WHERE quitado IS NOT NULL AND TRIM(quitado) <> ''
+        ORDER BY 1
+        """
+    )
+    quitados = [str(valor) for valor in quadro_quitado.iloc[:, 0].tolist()] if not quadro_quitado.empty else ["Nao", "Sim"]
+    f1, f2, f3 = st.columns([2, 1, 1])
+    texto = f1.text_input(
+        "Pesquisar",
+        placeholder="Código, nome, histórico, duplicata ou observação",
+        key="busca_next_fin",
+        persist_state="session",
+    )
+    quitado = f2.multiselect(
+        "Quitado",
+        quitados,
+        key="quitado_next_fin",
+        persist_state="session",
+    )
+    limite = f3.slider(
+        "Máximo de linhas",
+        50,
+        5000,
+        500,
+        50,
+        key="limite_next_fin",
+        persist_state="session",
+    )
+    d1, d2 = st.columns(2)
+    inicio = d1.date_input(
+        "Vencimento de",
+        value=None,
+        key="next_de_fin",
+        format="DD/MM/YYYY",
+        persist_state="session",
+    )
+    fim = d2.date_input(
+        "Vencimento até",
+        value=None,
+        key="next_ate_fin",
+        format="DD/MM/YYYY",
+        persist_state="session",
+    )
+    params: list = [tipo]
+    where = " WHERE tipo = ?"
+    where += clausula_pesquisa_next(termo, params)
+    where += text_clause(["codigo", "nome", "historico", "duplicata", "obs_conta"], texto, params)
+    where += in_clause("quitado", quitado, params)
+    where += date_clause("vencimento", inicio, fim, params)
+    totais = query(
+        f"""
+        SELECT COUNT(*) AS n, SUM(valor_liquido) AS valor, SUM(valor_pago) AS pago,
+               SUM(valor_liquido - COALESCE(valor_pago, 0)) AS aberto
+        FROM next_lancamento{where}
+        """,
+        tuple(params),
+    )
+    recebida = (
+        "lower(IFNULL(quitado, '')) = 'sim' "
+        "AND substr(IFNULL(CAST(data_pagamento AS TEXT), ''), 1, 10) >= ?"
+    )
+    frame = query(
+        f"""
+        SELECT codigo, {descricao_sql} AS descricao, duplicata, vencimento, quitado,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento
+        FROM next_lancamento{where}
+        ORDER BY CASE WHEN lower(IFNULL(quitado, '')) <> 'sim' THEN 0 ELSE 1 END,
+                 CASE WHEN {recebida} THEN 0 ELSE 1 END,
+                 CASE WHEN {recebida} THEN data_pagamento END DESC,
+                 CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END,
+                 vencimento, codigo
+        LIMIT ?
+        """,
+        tuple([*params, limite_recente, limite_recente, int(limite)]),
+    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Linhas no filtro", inteiro(totais.iat[0, 0] or 0))
+    m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
+    m3.metric("Saldo em aberto", brl(totais.iat[0, 3]))
+    tabela_next(frame, "fin")
+    if st.session_state.get("next_baixa_id"):
+        dialogo_baixa_next()
+
+
+def ir_contas_receber() -> None:
+    st.session_state.aba_pv = ABA_FIN
+    st.session_state.next_fin_lista = "receber"
+    st.session_state.quitado_next_fin = ["Nao"]
+    st.session_state.busca_next_fin = ""
+
+
+def origem_next() -> None:
+    origem = query(
+        """
+        SELECT origem_arquivo AS arquivo,
+               CASE tipo WHEN 'pagar' THEN 'Despesa' ELSE 'Receita' END AS aba,
+               COUNT(*) AS registros,
+               MAX(importado_em) AS importado_em
+        FROM next_lancamento
+        GROUP BY origem_arquivo, tipo
+        ORDER BY origem_arquivo
+        """
+    )
+    if origem.empty:
+        return
+    with st.expander("Origem da importação"):
+        st.dataframe(format_frame(origem), width="stretch", hide_index=True)
+
+
+def visao_next() -> None:
+    mostrar_lembrete_next()
+    resumo = query(
+        """
+        SELECT
+            COUNT(*) FILTER (
+                WHERE tipo = 'receber' AND lower(COALESCE(quitado, '')) <> 'sim'
+            ) AS receber_n,
+            COUNT(*) FILTER (
+                WHERE tipo = 'pagar' AND lower(COALESCE(quitado, '')) <> 'sim'
+            ) AS pagar_n,
+            COUNT(DISTINCT NULLIF(TRIM(COALESCE(nome, historico)), '')) FILTER (
+                WHERE tipo = 'receber'
+            ) AS clientes,
+            COUNT(*) AS contas,
+            SUM(valor_liquido - COALESCE(valor_pago, 0)) FILTER (
+                WHERE tipo = 'receber' AND lower(COALESCE(quitado, '')) <> 'sim'
+            ) AS aberto
+        FROM next_lancamento
+        """
+    )
+    receber_n = int(resumo.iat[0, 0] or 0) if not resumo.empty else 0
+    pagar_n = int(resumo.iat[0, 1] or 0) if not resumo.empty else 0
+    clientes = int(resumo.iat[0, 2] or 0) if not resumo.empty else 0
+    contas = int(resumo.iat[0, 3] or 0) if not resumo.empty else 0
+    aberto = resumo.iat[0, 4] if not resumo.empty else 0
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Contas a receber", inteiro(receber_n))
+    c2.metric("Contas a pagar", inteiro(pagar_n))
+    c3.metric("Clientes", inteiro(clientes))
+    c4.metric("Lançamentos", inteiro(contas))
+    c5, c6 = st.columns([1, 2])
+    c5.metric("Contas", inteiro(contas))
+    with c6:
+        st.markdown(
+            f"""
+            <div style="background:#fff6ed;border:2px solid #c2410c;border-radius:14px;padding:18px 22px;">
+              <div style="font-size:0.95rem;color:#9a3412;font-weight:700;">Em aberto (receita)</div>
+              <div style="font-size:2rem;line-height:1.15;color:#7c2d12;font-weight:800;margin-top:4px;">{brl(aberto)}</div>
+              <div style="color:#9a3412;margin-top:6px;">{inteiro(receber_n)} contas de receita ainda não quitadas</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.button("Ver contas em aberto", type="primary", on_click=ir_contas_receber, width="stretch")
+    por_tipo = query(
+        """
+        SELECT CASE tipo WHEN 'pagar' THEN 'Despesa' ELSE 'Receita' END AS tipo,
+               COUNT(*) AS contas
+        FROM next_lancamento
+        GROUP BY tipo
+        ORDER BY tipo
+        """
+    )
+    mensal = query(
+        """
+        SELECT substr(CAST(vencimento AS TEXT), 1, 7) AS mes,
+               SUM(CASE WHEN tipo = 'receber' THEN valor_liquido ELSE 0 END) AS receitas,
+               SUM(CASE WHEN tipo = 'pagar' THEN valor_liquido ELSE 0 END) AS despesas
+        FROM next_lancamento
+        WHERE vencimento IS NOT NULL
+        GROUP BY mes
+        ORDER BY mes
+        """
+    )
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Contas por tipo")
+        if por_tipo.empty:
+            st.write("Sem dados.")
+        else:
+            st.bar_chart(por_tipo.set_index("tipo")["contas"], height=280, sort=False)
+    with right:
+        st.subheader("Lançamentos por mês")
+        if mensal.empty:
+            st.write("Sem dados.")
+        else:
+            st.line_chart(mensal.set_index("mes")[["receitas", "despesas"]], height=280)
+    st.subheader("Maiores clientes por receita")
+    top = query(
+        """
+        SELECT COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), '')) AS cliente,
+               COUNT(*) AS contas,
+               ROUND(SUM(valor_liquido), 2) AS valor,
+               ROUND(SUM(COALESCE(valor_pago, 0)), 2) AS valor_pago
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+        GROUP BY COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), ''))
+        HAVING COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), '')) IS NOT NULL
+        ORDER BY valor DESC
+        LIMIT 15
+        """
+    )
+    if not top.empty:
+        st.dataframe(
+            format_frame(top),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "cliente": "cliente",
+                "contas": st.column_config.NumberColumn("contas", format="%d"),
+                "valor": st.column_config.NumberColumn("valor", format="R$ %.2f"),
+                "valor_pago": st.column_config.NumberColumn("valor pago", format="R$ %.2f"),
+            },
+        )
+    origem_next()
+
+
+def contas_next_clientes() -> pd.DataFrame:
+    frame = query(
+        """
+        SELECT id,
+               COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), ''), 'Sem identificação') AS cliente,
+               codigo,
+               duplicata AS parcela,
+               COALESCE(NULLIF(TRIM(historico), ''), NULLIF(TRIM(nome), '')) AS descricao,
+               vencimento,
+               quitado,
+               ROUND(COALESCE(valor_liquido, 0), 2) AS valor,
+               ROUND(COALESCE(valor_pago, 0), 2) AS valor_pago,
+               COALESCE(juros, 0) AS juros,
+               COALESCE(multa, 0) AS multa,
+               ROUND(COALESCE(valor_liquido, 0) - COALESCE(valor_pago, 0), 2) AS saldo
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+        """
+    )
+    if frame.empty:
+        return frame
+    frame["cliente"] = frame["cliente"].map(lambda valor: texto_limpo(valor) or "Sem identificação")
+    frame["chave"] = frame["cliente"].str.casefold()
+    vencimento = pd.to_datetime(frame["vencimento"], errors="coerce")
+    aberta = frame["quitado"].fillna("").astype(str).str.casefold().ne("sim")
+    frame["vencida"] = (aberta & vencimento.notna() & (vencimento < pd.Timestamp(date.today()))).astype(int)
+    return frame
+
+
+def abrir_divida_next() -> None:
+    click = st.session_state.get("nx_cli_click")
+    if click is None:
+        return
+    ordem = list(st.session_state.get("nx_cli_ordem") or [])
+    rotulos = list(st.session_state.get("nx_cli_rotulos") or [])
+    nomes = list(st.session_state.get("nx_cli_nomes") or [])
+    try:
+        rotulo = click.label
+        indice = click.row
+    except AttributeError:
+        rotulo = click["label"]
+        indice = click["row"]
+    escolhido = None
+    if isinstance(rotulo, str) and rotulos.count(rotulo) == 1:
+        escolhido = rotulos.index(rotulo)
+    elif isinstance(indice, int) and 0 <= indice < len(ordem):
+        escolhido = indice
+    if escolhido is None:
+        return
+    st.session_state.nx_cli_cliente = ordem[escolhido]
+    st.session_state.nx_cli_nome = nomes[escolhido] if escolhido < len(nomes) else ordem[escolhido]
+
+
+def fechar_cliente_next() -> None:
+    st.session_state.nx_cli_cliente = None
+    st.session_state.nx_cli_nome = None
+
+
+@st.dialog("Dívidas do cliente", width="large", on_dismiss=fechar_cliente_next)
+def dialogo_dividas_next() -> None:
+    base = contas_next_clientes()
+    chave = st.session_state.get("nx_cli_cliente")
+    if not chave:
+        return
+    nome = st.session_state.get("nx_cli_nome") or chave
+    linhas = base[(base["chave"] == chave) & (base["vencida"] == 1)].copy()
+    st.subheader(nome)
+    if linhas.empty:
+        st.success("Este cliente não tem dívida vencida. Ele está na lista de adimplentes.")
+        return
+    linhas["dias"] = [
+        dias_em_atraso(vencimento, quitado)
+        for vencimento, quitado in zip(linhas["vencimento"], linhas["quitado"], strict=True)
+    ]
+    linhas["vencimento"] = linhas["vencimento"].map(data_br)
+    st.caption(f"Dívida vencida: {brl(linhas['saldo'].sum())}.")
+    visivel = linhas[["codigo", "descricao", "vencimento", "dias", "parcela", "valor", "valor_pago", "saldo"]]
+    st.dataframe(
+        visivel,
+        width="stretch",
+        hide_index=True,
+        height=360,
+        column_config={
+            "codigo": st.column_config.TextColumn("Código"),
+            "descricao": st.column_config.TextColumn("Descrição"),
+            "vencimento": st.column_config.TextColumn("Vencimento"),
+            "dias": st.column_config.NumberColumn("Dias vencidos"),
+            "parcela": st.column_config.TextColumn("Parcela"),
+            "valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+            "valor_pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f"),
+            "saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
+        },
+        alt=f"Dívidas de {nome}",
+    )
+
+
+def clientes_next() -> None:
+    base = contas_next_clientes()
+    termo = st.text_input(
+        "Pesquisar cliente",
+        placeholder="Nome do cliente",
+        key="busca_cli_next",
+        persist_state="session",
+    )
+    if termo.strip() and not base.empty:
+        base = base[contem_termo(base["cliente"], termo)]
+    if not base.empty:
+        base = base[base["quitado"].fillna("").astype(str).str.casefold().ne("sim")]
+    st.caption("O valor do cliente fica separado em contas vencidas e contas a vencer. O botão abre as notas em aberto.")
+    mostrar_totais_cliente(base)
+    if st.session_state.get("next_baixa_id"):
+        dialogo_baixa_next()
+
+
+def tela_pv() -> None:
+    usuario = st.session_state.usuario
+    garantir_next()
+    cabecalho_modulo()
+    periodo = query("SELECT MIN(vencimento), MAX(vencimento) FROM next_lancamento")
+    legenda = None
+    if not periodo.empty and periodo.iat[0, 0]:
+        legenda = f"Vencimentos de {data_br(periodo.iat[0, 0])} a {data_br(periodo.iat[0, 1])}"
+    lateral_modulo(
+        usuario,
+        "Histórico do Next. As baixas das contas em aberto são gravadas neste banco.",
+        legenda,
+    )
+    abas = [ABA_GERAL, ABA_FIN, ABA_CLI]
+    if usuario["administrador"]:
+        abas.append(ABA_USUARIOS)
+        abas.append(ABA_LOG)
+    menu_principal(abas, "aba_pv")
+    aba = st.session_state.get("aba_pv")
+    if aba == ABA_FIN:
+        painel_contas_next()
+    elif aba == ABA_CLI:
+        clientes_next()
+    elif aba == ABA_USUARIOS:
+        aba_usuarios()
+    elif aba == ABA_LOG:
+        aba_log()
+    else:
+        visao_next()
+    barra_rolagem_superior()
+
+
+
+
+def menu_principal(abas: list[str], chave: str = "aba") -> None:
+    ativa = st.session_state.get(chave)
+    if ativa not in abas:
+        ativa = abas[0]
+        st.session_state[chave] = ativa
     chave_ativa = CHAVES_MENU[ativa]
     st.html(
         f"""
@@ -3973,7 +5559,7 @@ def menu_principal(abas: list[str]) -> None:
         for nome in abas:
             if st.button(nome, key=CHAVES_MENU[nome], type="primary"):
                 if nome != ativa:
-                    st.session_state.aba = nome
+                    st.session_state[chave] = nome
                     st.rerun()
 
 
@@ -3993,12 +5579,15 @@ def main() -> None:
         st.error(f"Não foi possível conectar ao Supabase. {exc}")
         st.stop()
     if "usuario" in st.session_state:
-        usuario = usuario_sessao(int(st.session_state.usuario["id"]))
-        if usuario is None:
-            desconectar_sessao()
-            st.session_state.pop("usuario", None)
-        else:
-            st.session_state.usuario = usuario
+        agora = datetime.now().timestamp()
+        if st.session_state.get("usuario_verificado_em", 0) + 30 <= agora:
+            usuario = usuario_sessao(int(st.session_state.usuario["id"]))
+            st.session_state.usuario_verificado_em = agora
+            if usuario is None:
+                desconectar_sessao()
+                st.session_state.pop("usuario", None)
+            else:
+                st.session_state.usuario = usuario
     if "usuario" not in st.session_state:
         tela_acesso()
         return
@@ -4014,17 +5603,7 @@ def main() -> None:
     if modulo != "os":
         tela_modulos()
         return
-    logo, titulo, sair = st.columns([1, 4, 1], vertical_alignment="center")
-    with logo:
-        mostrar_logo(92)
-    with titulo:
-        st.title(TITULO)
-    with sair:
-        if st.button("Menu", width="stretch", key="voltar_menu"):
-            st.session_state.modulo = None
-            st.rerun()
-        if st.button("Sair", width="stretch", key="sair_topo"):
-            encerrar_sessao()
+    cabecalho_modulo()
     if "aba" not in st.session_state:
         st.session_state.aba = ABA_GERAL
     if "financeiro_aberto" not in st.session_state:
@@ -4040,21 +5619,15 @@ def main() -> None:
     st.session_state.setdefault("cli_os", None)
     st.session_state.setdefault("cli_os_aberta", None)
 
-    with st.sidebar:
-        mostrar_logo(150)
-        st.header(TITULO)
-        st.write(usuario["nome"])
-        if usuario["administrador"]:
-            st.caption("Administrador")
-        st.write("Histórico da Oficina Integrada. As baixas das contas em aberto são gravadas neste banco.")
-        if st.button("Sair", width="stretch", key="sair_menu"):
-            encerrar_sessao()
-        if st.button("Atualizar dados", width="stretch"):
-            st.cache_data.clear()
-            st.rerun()
-        periodo = query("SELECT MIN(data_entrada), MAX(data_entrada) FROM oficina_os")
-        if not periodo.empty and periodo.iat[0, 0]:
-            st.caption(f"Entradas de {periodo.iat[0, 0]} a {periodo.iat[0, 1]}")
+    periodo = query("SELECT MIN(data_entrada), MAX(data_entrada) FROM oficina_os")
+    legenda = None
+    if not periodo.empty and periodo.iat[0, 0]:
+        legenda = f"Entradas de {periodo.iat[0, 0]} a {periodo.iat[0, 1]}"
+    lateral_modulo(
+        usuario,
+        "Histórico da Oficina Integrada. As baixas das contas em aberto são gravadas neste banco.",
+        legenda,
+    )
 
     abas = list(ABAS)
     if usuario["administrador"]:
