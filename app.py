@@ -3,11 +3,14 @@ import streamlit as st
 
 try:
     # --- O SEU CÓDIGO ORIGINAL COMEÇA AQUI ---
+    import hashlib
     import html
     import json
+    import secrets
     from datetime import date, datetime, timedelta
     import pandas as pd
     from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import IntegrityError
 
     # (Pode colar o resto do seu código original logo abaixo disto)
 
@@ -23,6 +26,7 @@ ABA_OS = "Ordens de Serviço"
 ABA_FIN = "Financeiro"
 ABA_CLI = "Clientes"
 ABA_NF = "Notas Fiscais (NFS-e)"
+ABA_USUARIOS = "Usuários"
 ABAS = [ABA_GERAL, ABA_OS, ABA_FIN, ABA_CLI, ABA_NF]
 
 OS_RESUMO_COLS = [
@@ -737,12 +741,43 @@ def aba_os() -> None:
     """
     resumo = query(sql, tuple(params + [int(limite)]))
     resumo = resumo[OS_RESUMO_COLS]
-    show_table(
-        resumo.rename(columns=OS_RESUMO_NOMES),
-        "oficina_os",
-        f"{inteiro(len(resumo))} O.S. nesta lista, uma linha por ordem",
+    visivel = format_frame(resumo).rename(columns=OS_RESUMO_NOMES)
+    visivel["Número da O.S."] = visivel["Número da O.S."].map(
+        lambda valor: "" if numero_os(valor) is None else str(numero_os(valor))
     )
+    st.caption(f"{inteiro(len(visivel))} O.S. nesta lista, uma linha por ordem")
+    if visivel.empty:
+        st.info("Nenhum registro encontrado com esses filtros.")
+    else:
+        st.caption("Clique no número da O.S. para abrir a ordem completa.")
+        config = column_config(list(visivel.columns))
+        config["Número da O.S."] = st.column_config.ButtonColumn(
+            "Número da O.S.",
+            type="primary",
+            pinned=True,
+            help="Clique para ver a OS completa",
+            on_click=pedir_os,
+            kwargs={"origem": "ordens", "chave": "os_click_lista"},
+            key="os_click_lista",
+        )
+        st.dataframe(
+            visivel,
+            width="stretch",
+            hide_index=True,
+            height=560,
+            column_config=config,
+            alt="Lista de ordens de serviço",
+        )
+        st.download_button(
+            "Baixar CSV deste resultado",
+            data=visivel.to_csv(index=False).encode("utf-8-sig"),
+            file_name="oficina_os.csv",
+            mime="text/csv",
+            key="download_oficina_os",
+        )
     if resumo.empty:
+        if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
+            dialogo_os()
         return
 
     ids = tuple(int(valor) for valor in resumo["id_os"].tolist())
@@ -794,6 +829,8 @@ def aba_os() -> None:
                 hide_index=True,
                 column_config=column_config(list(itens.columns)),
             )
+    if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
+        dialogo_os()
 
 
 def texto_banco(valor) -> str:
@@ -1138,7 +1175,10 @@ def dialogo_os() -> None:
             st.session_state.fin_os_aberta = numero
             st.rerun(scope="fragment")
         return
-    if st.button("Voltar ao financeiro", type="primary", key="voltar_fin_os"):
+    rotulo_voltar = (
+        "Voltar à lista" if st.session_state.get("fin_origem") == "ordens" else "Voltar ao financeiro"
+    )
+    if st.button(rotulo_voltar, type="primary", key="voltar_fin_os"):
         voltar_financeiro()
         st.rerun()
     st.subheader(f"OS {numero}")
@@ -1574,6 +1614,24 @@ def aba_financeiro() -> None:
     termo = pesquisa_financeiro()
     params_abertas: list = []
     filtro_aberto = clausula_pesquisa_oficina(termo, params_abertas)
+    limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
+    params_recentes = [limite_recente, *params_abertas]
+    recentes = query(
+        f"""
+        SELECT id, os, nome, quitado, vencimento, valor, valor_pago,
+               ROUND(COALESCE(valor, 0) - COALESCE(valor_pago, 0), 2) AS saldo,
+               dt_pagamento, obs_conta, forma_pagamento, parcela, descricao
+        FROM oficina_financeiro
+        WHERE tipo = 'Receita'
+          AND lower(IFNULL(quitado, '')) = 'sim'
+          AND substr(IFNULL(dt_pagamento, ''), 1, 10) >= ?
+          {filtro_aberto}
+        ORDER BY dt_pagamento DESC, id DESC
+        """,
+        tuple(params_recentes),
+    )
+    if recentes.empty:
+        st.info(f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias.")
     abertas = query(
         f"""
         SELECT id, os, nome, quitado, vencimento, valor, valor_pago,
@@ -1617,22 +1675,6 @@ def aba_financeiro() -> None:
     st.caption(
         f"Contas quitadas nos últimos {DIAS_EDICAO_BAIXA} dias ficam em azul e ainda podem ser corrigidas. "
         "Depois desse prazo a baixa fica bloqueada, como o restante do painel."
-    )
-    limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
-    params_recentes = [limite_recente, *params_abertas]
-    recentes = query(
-        f"""
-        SELECT id, os, nome, quitado, vencimento, valor, valor_pago,
-               ROUND(COALESCE(valor, 0) - COALESCE(valor_pago, 0), 2) AS saldo,
-               dt_pagamento, obs_conta, forma_pagamento, parcela, descricao
-        FROM oficina_financeiro
-        WHERE tipo = 'Receita'
-          AND lower(IFNULL(quitado, '')) = 'sim'
-          AND substr(IFNULL(dt_pagamento, ''), 1, 10) >= ?
-          {filtro_aberto}
-        ORDER BY dt_pagamento DESC, id DESC
-        """,
-        tuple(params_recentes),
     )
     if recentes.empty:
         st.info(f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias.")
@@ -1715,7 +1757,7 @@ def aba_financeiro() -> None:
     m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
     m3.metric("Saldo em aberto", brl(totais.iat[0, 3]))
     tabela_contas(frame, "todas", "fin_click_todas")
-    if st.session_state.get("fin_os_perguntar"):
+    if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") != "ordens":
         dialogo_os()
     if rolar in {"abertas", "recentes", "todas"}:
         st.html(
@@ -2156,16 +2198,322 @@ def barra_rolagem_superior() -> None:
     )
 
 
+def _hash_senha(senha: str, salt: bytes | None = None) -> tuple[str, str]:
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", senha.encode(), salt, 120_000)
+    return salt.hex(), digest.hex()
+
+
+def _senha_confere(senha: str, salt_hex: str, hash_hex: str) -> bool:
+    digest = hashlib.pbkdf2_hmac("sha256", senha.encode(), bytes.fromhex(salt_hex), 120_000)
+    return secrets.compare_digest(digest.hex(), hash_hex)
+
+
+def _erro_login(login: str) -> str | None:
+    login = login.strip()
+    if len(login) < 3:
+        return "O login precisa ter pelo menos 3 caracteres."
+    if any(caractere.isspace() for caractere in login):
+        return "O login não pode conter espaços."
+    return None
+
+
+def _erro_senha(senha: str) -> str | None:
+    if len(senha) < 6:
+        return "A senha precisa ter pelo menos 6 caracteres."
+    return None
+
+
+def garantir_usuarios() -> None:
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_usuario (
+                    id bigserial PRIMARY KEY,
+                    nome text NOT NULL,
+                    login text NOT NULL,
+                    senha_salt text NOT NULL,
+                    senha_hash text NOT NULL,
+                    administrador boolean NOT NULL DEFAULT false,
+                    ativo boolean NOT NULL DEFAULT true,
+                    criado_em timestamptz NOT NULL DEFAULT now()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS painel_usuario_login_lower
+                ON painel_usuario (lower(login))
+                """
+            )
+        )
+
+
+def contar_usuarios() -> int:
+    with engine().connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM painel_usuario")).scalar()
+    return int(total or 0)
+
+
+def autenticar(login: str, senha: str) -> tuple[dict | None, str | None]:
+    with engine().connect() as conn:
+        linha = conn.execute(
+            text(
+                """
+                SELECT id, nome, login, senha_salt, senha_hash, administrador, ativo
+                FROM painel_usuario
+                WHERE lower(login) = lower(:login)
+                """
+            ),
+            {"login": login.strip()},
+        ).mappings().first()
+    if linha is None or not _senha_confere(senha, linha["senha_salt"], linha["senha_hash"]):
+        return None, "Login ou senha incorretos."
+    if not linha["ativo"]:
+        return None, "Este usuário está desativado."
+    return {
+        "id": int(linha["id"]),
+        "nome": linha["nome"],
+        "login": linha["login"],
+        "administrador": bool(linha["administrador"]),
+    }, None
+
+
+def usuario_sessao(usuario_id: int) -> dict | None:
+    with engine().connect() as conn:
+        linha = conn.execute(
+            text(
+                """
+                SELECT id, nome, login, administrador, ativo
+                FROM painel_usuario
+                WHERE id = :id
+                """
+            ),
+            {"id": usuario_id},
+        ).mappings().first()
+    if linha is None or not linha["ativo"]:
+        return None
+    return {
+        "id": int(linha["id"]),
+        "nome": linha["nome"],
+        "login": linha["login"],
+        "administrador": bool(linha["administrador"]),
+    }
+
+
+def criar_usuario(nome: str, login: str, senha: str, administrador: bool) -> str | None:
+    nome = nome.strip()
+    login = login.strip()
+    if not nome:
+        return "Informe o nome."
+    erro = _erro_login(login) or _erro_senha(senha)
+    if erro:
+        return erro
+    salt, digest = _hash_senha(senha)
+    try:
+        with engine().begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO painel_usuario
+                        (nome, login, senha_salt, senha_hash, administrador)
+                    VALUES
+                        (:nome, :login, :salt, :digest, :administrador)
+                    """
+                ),
+                {
+                    "nome": nome,
+                    "login": login,
+                    "salt": salt,
+                    "digest": digest,
+                    "administrador": administrador,
+                },
+            )
+    except IntegrityError:
+        return "Já existe um usuário com esse login."
+    return None
+
+
+def listar_usuarios() -> pd.DataFrame:
+    with engine().connect() as conn:
+        linhas = conn.execute(
+            text(
+                """
+                SELECT id, nome, login, administrador, ativo
+                FROM painel_usuario
+                ORDER BY nome, login
+                """
+            )
+        ).mappings().all()
+    return pd.DataFrame(linhas, columns=["id", "nome", "login", "administrador", "ativo"])
+
+
+def admins_ativos(exceto_id: int | None = None) -> int:
+    sql = "SELECT COUNT(*) FROM painel_usuario WHERE administrador AND ativo"
+    params: dict = {}
+    if exceto_id is not None:
+        sql += " AND id <> :id"
+        params["id"] = exceto_id
+    with engine().connect() as conn:
+        total = conn.execute(text(sql), params).scalar()
+    return int(total or 0)
+
+
+def definir_ativo(usuario_id: int, ativo: bool) -> str | None:
+    if not ativo and admins_ativos(exceto_id=usuario_id) == 0:
+        return "É preciso manter pelo menos um administrador ativo."
+    with engine().begin() as conn:
+        conn.execute(
+            text("UPDATE painel_usuario SET ativo = :ativo WHERE id = :id"),
+            {"ativo": ativo, "id": usuario_id},
+        )
+    return None
+
+
+def definir_senha(usuario_id: int, senha: str) -> str | None:
+    erro = _erro_senha(senha)
+    if erro:
+        return erro
+    salt, digest = _hash_senha(senha)
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE painel_usuario
+                SET senha_salt = :salt, senha_hash = :digest
+                WHERE id = :id
+                """
+            ),
+            {"salt": salt, "digest": digest, "id": usuario_id},
+        )
+    return None
+
+
+def tela_acesso() -> None:
+    _, centro, _ = st.columns([1, 1.2, 1])
+    with centro:
+        st.title(TITULO)
+        if contar_usuarios() == 0:
+            st.subheader("Criar o administrador")
+            st.caption("Esta conta cadastra as outras pessoas do painel.")
+            with st.form("primeiro_admin"):
+                nome = st.text_input("Nome")
+                login = st.text_input("Login")
+                senha = st.text_input("Senha", type="password")
+                confirma = st.text_input("Confirmar senha", type="password")
+                criar = st.form_submit_button("Criar administrador", type="primary", width="stretch")
+            if criar:
+                if senha != confirma:
+                    st.error("As senhas não são iguais.")
+                    return
+                erro = criar_usuario(nome, login, senha, True)
+                if erro:
+                    st.error(erro)
+                    return
+                usuario, _ = autenticar(login, senha)
+                st.session_state.usuario = usuario
+                st.rerun()
+            return
+        st.subheader("Entrar")
+        with st.form("login"):
+            login = st.text_input("Login")
+            senha = st.text_input("Senha", type="password")
+            entrar = st.form_submit_button("Entrar", type="primary", width="stretch")
+        if entrar:
+            usuario, erro = autenticar(login, senha)
+            if erro or usuario is None:
+                st.error(erro or "Login ou senha incorretos.")
+                return
+            st.session_state.usuario = usuario
+            st.rerun()
+
+
+def aba_usuarios() -> None:
+    if not st.session_state.usuario["administrador"]:
+        st.session_state.aba = ABA_GERAL
+        st.rerun()
+    st.subheader("Usuários")
+    with st.container(border=True):
+        st.markdown("Novo usuário")
+        with st.form("novo_usuario", clear_on_submit=True):
+            nome = st.text_input("Nome", key="novo_nome")
+            login = st.text_input("Login", key="novo_login")
+            senha = st.text_input("Senha", type="password", key="novo_senha")
+            administrador = st.checkbox("Administrador", key="novo_admin")
+            cadastrar = st.form_submit_button("Cadastrar", type="primary")
+        if cadastrar:
+            erro = criar_usuario(nome, login, senha, administrador)
+            if erro:
+                st.error(erro)
+            else:
+                st.success(f"{nome.strip()} foi cadastrado.")
+    lista = listar_usuarios()
+    visivel = lista.drop(columns=["id"]).rename(
+        columns={
+            "nome": "Nome",
+            "login": "Login",
+            "administrador": "Administrador",
+            "ativo": "Ativo",
+        }
+    )
+    st.dataframe(visivel, hide_index=True, width="stretch", alt="Usuários cadastrados no painel")
+    escolhido = st.selectbox(
+        "Alterar usuário",
+        lista["id"].tolist(),
+        format_func=lambda usuario_id: lista.loc[lista["id"] == usuario_id, "nome"].iloc[0]
+        + " ("
+        + lista.loc[lista["id"] == usuario_id, "login"].iloc[0]
+        + ")",
+    )
+    linha = lista.loc[lista["id"] == escolhido].iloc[0]
+    eu = int(st.session_state.usuario["id"])
+    if int(linha["id"]) == eu:
+        st.caption("Esta é a sua conta.")
+    else:
+        rotulo = "Desativar" if bool(linha["ativo"]) else "Reativar"
+        if st.button(rotulo, key="alternar_usuario"):
+            erro = definir_ativo(int(linha["id"]), not bool(linha["ativo"]))
+            if erro:
+                st.error(erro)
+            else:
+                st.rerun()
+    with st.form(f"trocar_senha_{int(linha['id'])}"):
+        nova = st.text_input("Nova senha", type="password")
+        salvar = st.form_submit_button("Salvar senha")
+    if salvar:
+        erro = definir_senha(int(linha["id"]), nova)
+        if erro:
+            st.error(erro)
+        else:
+            st.success("Senha atualizada.")
+
+
 def main() -> None:
     st.set_page_config(page_title=TITULO, page_icon=":wrench:", layout="wide")
-    st.title(TITULO)
-    st.caption("Histórico no Supabase")
     try:
         with engine().connect() as conn:
             conn.execute(text("SELECT 1"))
+        garantir_usuarios()
     except Exception as exc:
+        st.title(TITULO)
         st.error(f"Não foi possível conectar ao Supabase. {exc}")
         st.stop()
+    if "usuario" in st.session_state:
+        usuario = usuario_sessao(int(st.session_state.usuario["id"]))
+        if usuario is None:
+            st.session_state.pop("usuario", None)
+        else:
+            st.session_state.usuario = usuario
+    if "usuario" not in st.session_state:
+        tela_acesso()
+        return
+    usuario = st.session_state.usuario
+    st.title(TITULO)
+    st.caption("Histórico no Supabase")
     if "aba" not in st.session_state:
         st.session_state.aba = ABA_GERAL
     if "financeiro_aberto" not in st.session_state:
@@ -2183,7 +2531,13 @@ def main() -> None:
 
     with st.sidebar:
         st.header(TITULO)
+        st.write(usuario["nome"])
+        if usuario["administrador"]:
+            st.caption("Administrador")
         st.write("Histórico da Oficina Integrada. As baixas das contas em aberto são gravadas neste banco.")
+        if st.button("Sair", width="stretch"):
+            st.session_state.pop("usuario", None)
+            st.rerun()
         if st.button("Atualizar dados", width="stretch"):
             st.cache_data.clear()
             st.rerun()
@@ -2191,9 +2545,14 @@ def main() -> None:
         if not periodo.empty and periodo.iat[0, 0]:
             st.caption(f"Entradas de {periodo.iat[0, 0]} a {periodo.iat[0, 1]}")
 
+    abas = list(ABAS)
+    if usuario["administrador"]:
+        abas.append(ABA_USUARIOS)
+    if st.session_state.get("aba") not in abas:
+        st.session_state.aba = ABA_GERAL
     aba = st.segmented_control(
         "Seções",
-        ABAS,
+        abas,
         key="aba",
         required=True,
         label_visibility="collapsed",
@@ -2207,6 +2566,8 @@ def main() -> None:
         aba_clientes()
     elif aba == ABA_NF:
         aba_nfse()
+    elif aba == ABA_USUARIOS:
+        aba_usuarios()
     else:
         visao_geral()
     barra_rolagem_superior()
