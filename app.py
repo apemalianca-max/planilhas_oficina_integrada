@@ -363,8 +363,8 @@ def engine():
             conn.execute(text("SELECT 1"))
         return eng
     except Exception as e:
-        st.error(f"Erro ao ligar ao Supabase: {e}")
-        st.stop()
+        print(f"ERRO CRITICO SUPABASE: {e}")
+        raise e
 
 
 @st.cache_data(ttl=120, show_spinner=False)
