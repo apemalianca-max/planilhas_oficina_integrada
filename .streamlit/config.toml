@@ -15,7 +15,11 @@ secondaryBackgroundColor = "#e5f0ea"
 textColor = "#1a2e28"
 linkColor = "#0c6b4d"
 borderColor = "#c5d7ce"
-font = "sans serif"
+font = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap"
+headingFont = "Poppins:https://fonts.googleapis.com/css2?family=Poppins:wght@600;700&display=swap"
+baseFontSize = 14
+headingFontSizes = ["26px", "20px", "17px", "15px", "13px", "12px"]
+metricValueFontSize = "1.75rem"
 baseRadius = "10px"
 showWidgetBorder = true
 showSidebarBorder = true

@@ -78,6 +78,7 @@ ABA_FIN = "Financeiro"
 ABA_CLI = "Clientes"
 ABA_NF = "Notas Fiscais (NFS-e)"
 ABA_USUARIOS = "Usuários"
+ABA_LOG = "Log"
 ABAS = [ABA_GERAL, ABA_OS, ABA_FIN, ABA_CLI, ABA_NF]
 
 OS_RESUMO_COLS = [
@@ -571,8 +572,44 @@ def ir_financeiro_aberto() -> None:
     st.session_state.financeiro_aberto = True
 
 
+def texto_lembrete_baixa() -> str:
+    aviso = f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias."
+    ultima = scalar(
+        """
+        SELECT MAX(substr(IFNULL(dt_pagamento, ''), 1, 10))
+        FROM oficina_financeiro
+        WHERE tipo = 'Receita'
+          AND lower(IFNULL(quitado, '')) = 'sim'
+          AND substr(IFNULL(dt_pagamento, ''), 1, 10) <> ''
+        """
+    )
+    if not ultima:
+        return aviso
+    quando = pd.to_datetime(str(ultima)[:10], errors="coerce")
+    if pd.isna(quando):
+        return aviso
+    dias = (date.today() - quando.date()).days
+    if dias >= DIAS_EDICAO_BAIXA:
+        return aviso
+    if dias <= 0:
+        return "Última baixa hoje."
+    if dias == 1:
+        return "Última baixa a 1 dia."
+    return f"Última baixa a {dias} dias."
+
+
+def mostrar_lembrete_baixa() -> None:
+    texto = html.escape(texto_lembrete_baixa())
+    st.markdown(
+        "<p style='text-align:center;font-weight:700;font-size:1.05rem;margin:0.15rem 0 0.7rem'>"
+        f"{texto}</p>",
+        unsafe_allow_html=True,
+    )
+
+
 def visao_geral() -> None:
     st.header(TITULO)
+    mostrar_lembrete_baixa()
     if st.button("Pesquisar histórico", type="primary", key="abrir_historico"):
         st.session_state.historico_aberto = True
     if st.session_state.get("historico_aberto"):
@@ -616,8 +653,8 @@ def visao_geral() -> None:
         st.markdown(
             f"""
             <div style="background:#fff6ed;border:2px solid #c2410c;border-radius:14px;padding:18px 22px;">
-              <div style="font-size:1.05rem;color:#9a3412;font-weight:700;">Em aberto (receita)</div>
-              <div style="font-size:2.5rem;line-height:1.15;color:#7c2d12;font-weight:800;margin-top:4px;">{brl(aberto)}</div>
+              <div style="font-size:0.95rem;color:#9a3412;font-weight:700;">Em aberto (receita)</div>
+              <div style="font-size:2rem;line-height:1.15;color:#7c2d12;font-weight:800;margin-top:4px;">{brl(aberto)}</div>
               <div style="color:#9a3412;margin-top:6px;">{inteiro(qtd_aberto)} contas de receita ainda não quitadas</div>
             </div>
             """,
@@ -1046,6 +1083,41 @@ def texto_km(valor) -> str:
     return f"{numero:.1f}".replace(".", ",") + " km"
 
 
+def _resumo_log(valor: str, limite: int = 80) -> str:
+    texto = valor.strip()
+    if not texto:
+        return "vazio"
+    if len(texto) <= limite:
+        return texto
+    return texto[:limite].rstrip() + "…"
+
+
+def _sim_nao(valor: str) -> str:
+    return "Sim" if valor.casefold() == "sim" else "Não"
+
+
+def _descricao_baixa(linha, antes, quitado: str, pagamento: str | None, pago: float, obs: str) -> str:
+    os_num = texto_banco(getattr(linha, "os", "")) or "sem número"
+    cliente = texto_banco(getattr(linha, "nome", "")) or "sem cliente"
+    partes: list[str] = []
+    antes_pago = valor_banco(antes["valor_pago"])
+    if antes_pago != pago:
+        partes.append(f"valor pago de {brl(antes_pago)} para {brl(pago)}")
+    antes_quitado = texto_banco(antes["quitado"]) or "Nao"
+    if antes_quitado.casefold() != quitado.casefold():
+        partes.append(f"quitado de {_sim_nao(antes_quitado)} para {_sim_nao(quitado)}")
+    antes_data = data_banco(antes["dt_pagamento"])
+    if antes_data != pagamento:
+        partes.append(
+            f"data de pagamento de {data_br(antes_data) or 'vazia'} para {data_br(pagamento) or 'vazia'}"
+        )
+    antes_obs = texto_banco(antes["obs_conta"])
+    if antes_obs != obs:
+        partes.append(f"observação de {_resumo_log(antes_obs)} para {_resumo_log(obs)}")
+    mudancas = "; ".join(partes) if partes else "dados da baixa"
+    return f"OS {os_num}, {cliente}, conta {int(linha.id)}: {mudancas}."
+
+
 def gravar_baixas(editado: pd.DataFrame, original: pd.DataFrame) -> int:
     base = original.set_index("id")
     alteradas = 0
@@ -1087,6 +1159,11 @@ def gravar_baixas(editado: pd.DataFrame, original: pd.DataFrame) -> int:
                     "obs": obs or None,
                     "id": chave,
                 },
+            )
+            registrar_log(
+                "Baixa",
+                _descricao_baixa(linha, antes, quitado, pagamento, pago, obs),
+                conn=conn,
             )
             alteradas += 1
     return alteradas
@@ -1681,8 +1758,7 @@ def aba_financeiro() -> None:
         """,
         tuple(params_recentes),
     )
-    if recentes.empty:
-        st.info(f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias.")
+    mostrar_lembrete_baixa()
     abertas = query(
         f"""
         SELECT id, os, nome, quitado, vencimento, valor, valor_pago,
@@ -1728,7 +1804,7 @@ def aba_financeiro() -> None:
         "Depois desse prazo a baixa fica bloqueada, como o restante do painel."
     )
     if recentes.empty:
-        st.info(f"Nenhuma baixa nos últimos {DIAS_EDICAO_BAIXA} dias.")
+        mostrar_lembrete_baixa()
     else:
         r1, r2 = st.columns(2)
         r1.metric("Baixas no prazo", inteiro(len(recentes)))
@@ -2310,6 +2386,93 @@ def garantir_usuarios() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_log (
+                    id bigserial PRIMARY KEY,
+                    quando timestamptz NOT NULL DEFAULT now(),
+                    usuario_id bigint,
+                    usuario_nome text,
+                    usuario_login text,
+                    acao text NOT NULL,
+                    detalhe text NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS painel_log_quando
+                ON painel_log (quando DESC)
+                """
+            )
+        )
+
+
+def registrar_log(
+    acao: str,
+    detalhe: str,
+    *,
+    usuario: dict | None = None,
+    login_informado: str | None = None,
+    conn=None,
+) -> None:
+    if usuario is None and login_informado is None:
+        usuario = st.session_state.get("usuario")
+    usuario = usuario or {}
+    usuario_id = usuario.get("id")
+    params = {
+        "usuario_id": int(usuario_id) if usuario_id is not None else None,
+        "usuario_nome": (usuario.get("nome") or login_informado or "").strip() or None,
+        "usuario_login": (usuario.get("login") or login_informado or "").strip() or None,
+        "acao": acao,
+        "detalhe": detalhe,
+    }
+    sql = text(
+        """
+        INSERT INTO painel_log (usuario_id, usuario_nome, usuario_login, acao, detalhe)
+        VALUES (:usuario_id, :usuario_nome, :usuario_login, :acao, :detalhe)
+        """
+    )
+    if conn is not None:
+        conn.execute(sql, params)
+        return
+    with engine().begin() as proprio:
+        proprio.execute(sql, params)
+
+
+def listar_log(limite: int = 400) -> pd.DataFrame:
+    colunas = ["quando", "usuario", "login", "acao", "detalhe"]
+    with engine().connect() as conn:
+        linhas = conn.execute(
+            text(
+                """
+                SELECT quando AT TIME ZONE 'America/Sao_Paulo' AS quando,
+                       COALESCE(usuario_nome, '') AS usuario,
+                       COALESCE(usuario_login, '') AS login,
+                       acao,
+                       detalhe
+                FROM painel_log
+                ORDER BY id DESC
+                LIMIT :limite
+                """
+            ),
+            {"limite": int(limite)},
+        ).mappings().all()
+    frame = pd.DataFrame(linhas, columns=colunas)
+    if not frame.empty:
+        frame["quando"] = pd.to_datetime(frame["quando"])
+    return frame
+
+
+def encerrar_sessao() -> None:
+    usuario = st.session_state.get("usuario")
+    if usuario:
+        registrar_log("Saída", "Saiu do painel.", usuario=usuario)
+    st.session_state.pop("usuario", None)
+    st.rerun()
 
 
 def contar_usuarios() -> int:
@@ -2499,7 +2662,16 @@ def tela_acesso() -> None:
                 if erro:
                     st.error(erro)
                     return
-                usuario, _ = autenticar(login, senha)
+                usuario, erro_login = autenticar(login, senha)
+                if usuario is None:
+                    st.error(erro_login or "Não foi possível entrar com a conta criada.")
+                    return
+                registrar_log(
+                    "Cadastro de usuário",
+                    "Criou a primeira conta de administrador.",
+                    usuario=usuario,
+                )
+                registrar_log("Acesso", "Entrou no painel.", usuario=usuario)
                 st.session_state.usuario = usuario
                 st.rerun()
             return
@@ -2511,8 +2683,15 @@ def tela_acesso() -> None:
         if entrar:
             usuario, erro = autenticar(login, senha)
             if erro or usuario is None:
-                st.error(erro or "Login ou senha incorretos.")
+                motivo = erro or "Login ou senha incorretos."
+                registrar_log(
+                    "Acesso",
+                    f"Tentativa de acesso recusada: {motivo}",
+                    login_informado=login.strip(),
+                )
+                st.error(motivo)
                 return
+            registrar_log("Acesso", "Entrou no painel.", usuario=usuario)
             st.session_state.usuario = usuario
             st.rerun()
 
@@ -2533,8 +2712,7 @@ def tela_trocar_senha() -> None:
             confirma = st.text_input("Confirmar nova senha", type="password")
             salvar = st.form_submit_button("Salvar nova senha", type="primary", width="stretch")
         if st.button("Sair", key="sair_troca", width="stretch"):
-            st.session_state.pop("usuario", None)
-            st.rerun()
+            encerrar_sessao()
         if not salvar:
             return
         if not senha_confere_id(int(usuario["id"]), atual):
@@ -2550,6 +2728,11 @@ def tela_trocar_senha() -> None:
         if erro:
             st.error(erro)
             return
+        registrar_log(
+            "Senha",
+            "Trocou a senha temporária do primeiro acesso.",
+            usuario=usuario,
+        )
         st.session_state.usuario = usuario_sessao(int(usuario["id"]))
         st.rerun()
 
@@ -2573,6 +2756,11 @@ def aba_usuarios() -> None:
             if erro:
                 st.error(erro)
             else:
+                papel = "administrador" if administrador else "usuário"
+                registrar_log(
+                    "Cadastro de usuário",
+                    f"Cadastrou {nome.strip()} (login {login.strip()}) como {papel}.",
+                )
                 st.success(f"{nome.strip()} foi cadastrado.")
     lista = listar_usuarios()
     visivel = lista.drop(columns=["id"]).rename(
@@ -2604,6 +2792,11 @@ def aba_usuarios() -> None:
             if erro:
                 st.error(erro)
             else:
+                verbo = "Reativou" if not bool(linha["ativo"]) else "Desativou"
+                registrar_log(
+                    "Usuário",
+                    f"{verbo} {linha['nome']} (login {linha['login']}).",
+                )
                 st.rerun()
     with st.form(f"trocar_senha_{int(linha['id'])}"):
         st.caption("Se a pessoa esqueceu a senha, defina outra. No próximo acesso ela terá que trocá-la.")
@@ -2615,10 +2808,71 @@ def aba_usuarios() -> None:
         if erro:
             st.error(erro)
         elif propria:
+            registrar_log("Senha", "Trocou a própria senha.")
             st.session_state.usuario = usuario_sessao(eu)
             st.success("Senha atualizada.")
         else:
+            registrar_log(
+                "Senha",
+                f"Redefiniu a senha de {linha['nome']} (login {linha['login']}). "
+                "A troca ficou pendente para o próximo acesso.",
+            )
             st.success("Senha redefinida. No próximo acesso a pessoa precisará trocá-la.")
+
+
+def aba_log() -> None:
+    if not st.session_state.usuario["administrador"]:
+        st.session_state.aba = ABA_GERAL
+        st.rerun()
+    st.subheader("Log")
+    st.caption(
+        "Acessos e alterações do painel, do mais recente para o mais antigo. "
+        "O registro começa a partir de agora."
+    )
+    registros = listar_log()
+    if registros.empty:
+        st.info("Nenhum acesso ou alteração registrado ainda.")
+        return
+    acoes = sorted(registros["acao"].dropna().unique().tolist())
+    busca, filtro = st.columns([2, 1])
+    texto = busca.text_input(
+        "Pesquisar",
+        placeholder="Usuário, login ou alteração",
+        key="busca_log",
+    )
+    escolhidas = filtro.multiselect("Ação", acoes, key="acao_log")
+    visivel = registros
+    if escolhidas:
+        visivel = visivel[visivel["acao"].isin(escolhidas)]
+    termo = texto.strip()
+    if termo:
+        mascara = pd.Series(False, index=visivel.index)
+        for coluna in ("usuario", "login", "acao", "detalhe"):
+            mascara = mascara | visivel[coluna].astype(str).str.contains(termo, case=False, na=False, regex=False)
+        visivel = visivel[mascara]
+    if visivel.empty:
+        st.info("Nenhum registro com esse filtro.")
+        return
+    st.caption(f"{inteiro(len(visivel))} registro(s).")
+    tabela = visivel.rename(
+        columns={
+            "quando": "Quando",
+            "usuario": "Usuário",
+            "login": "Login",
+            "acao": "Ação",
+            "detalhe": "Detalhe",
+        }
+    )
+    st.dataframe(
+        tabela,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Quando": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
+            "Detalhe": st.column_config.TextColumn("Detalhe", width="large"),
+        },
+        alt="Acessos e alterações do painel",
+    )
 
 
 def main() -> None:
@@ -2656,8 +2910,7 @@ def main() -> None:
         st.caption("Histórico no Supabase")
     with sair:
         if st.button("Sair", width="stretch", key="sair_topo"):
-            st.session_state.pop("usuario", None)
-            st.rerun()
+            encerrar_sessao()
     if "aba" not in st.session_state:
         st.session_state.aba = ABA_GERAL
     if "financeiro_aberto" not in st.session_state:
@@ -2681,8 +2934,7 @@ def main() -> None:
             st.caption("Administrador")
         st.write("Histórico da Oficina Integrada. As baixas das contas em aberto são gravadas neste banco.")
         if st.button("Sair", width="stretch", key="sair_menu"):
-            st.session_state.pop("usuario", None)
-            st.rerun()
+            encerrar_sessao()
         if st.button("Atualizar dados", width="stretch"):
             st.cache_data.clear()
             st.rerun()
@@ -2693,6 +2945,7 @@ def main() -> None:
     abas = list(ABAS)
     if usuario["administrador"]:
         abas.append(ABA_USUARIOS)
+        abas.append(ABA_LOG)
     if st.session_state.get("aba") not in abas:
         st.session_state.aba = ABA_GERAL
     aba = st.segmented_control(
@@ -2713,6 +2966,8 @@ def main() -> None:
         aba_nfse()
     elif aba == ABA_USUARIOS:
         aba_usuarios()
+    elif aba == ABA_LOG:
+        aba_log()
     else:
         visao_geral()
     barra_rolagem_superior()
