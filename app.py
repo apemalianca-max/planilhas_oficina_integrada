@@ -1,14 +1,20 @@
-"""Painel da Auto Peças & Mecânica Aliança sobre o Postgres do Supabase."""
-
-from __future__ import annotations
-
-import html
-import json
-from datetime import date, datetime, timedelta
-
-import pandas as pd
+import traceback
 import streamlit as st
-from sqlalchemy import create_engine, text
+
+try:
+    # --- O SEU CÓDIGO ORIGINAL COMEÇA AQUI ---
+    import html
+    import json
+    from datetime import date, datetime, timedelta
+    import pandas as pd
+    from sqlalchemy import create_engine, text
+
+    # (Pode colar o resto do seu código original logo abaixo disto)
+
+except Exception as e:
+    st.error("⚠️ ERRO CRÍTICO NO ARRANQUE DO APLICATIVO:")
+    st.code(traceback.format_exc())
+    st.stop()
 
 TITULO = "Auto Peças & Mecânica Aliança"
 
@@ -351,7 +357,11 @@ def _supabase_url() -> str:
 
 @st.cache_resource
 def engine():
-    return create_engine(_supabase_url(), pool_pre_ping=True)
+    try:
+        return create_engine(_supabase_url(), pool_pre_ping=True)
+    except Exception as e:
+        st.error(f"Erro ao ligar ao Supabase: {e}")
+        st.stop()
 
 
 @st.cache_data(ttl=120, show_spinner=False)
