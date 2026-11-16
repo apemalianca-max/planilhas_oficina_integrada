@@ -358,7 +358,10 @@ def _supabase_url() -> str:
 @st.cache_resource
 def engine():
     try:
-        return create_engine(_supabase_url(), pool_pre_ping=True)
+        eng = create_engine(_supabase_url(), pool_pre_ping=True)
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return eng
     except Exception as e:
         st.error(f"Erro ao ligar ao Supabase: {e}")
         st.stop()
