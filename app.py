@@ -86,6 +86,7 @@ OS_RESUMO_COLS = [
     "nome_cliente",
     "placa",
     "veiculo",
+    "km",
     "data_entrada",
     "situacao",
 ]
@@ -94,6 +95,7 @@ OS_RESUMO_NOMES = {
     "nome_cliente": "Cliente",
     "placa": "Placa",
     "veiculo": "Veículo",
+    "km": "Km",
     "data_entrada": "Data de Entrada",
     "situacao": "Situação",
 }
@@ -819,6 +821,7 @@ def aba_os() -> None:
                    TRIM(COALESCE(MAX(marca), '') || ' ' || COALESCE(MAX(modelo), '')),
                    ''
                ) AS veiculo,
+               MAX(km) AS km,
                MAX(data_entrada) AS data_entrada,
                MAX({SITUACAO_SQL}) AS situacao
         FROM oficina_os
@@ -829,6 +832,7 @@ def aba_os() -> None:
     """
     resumo = query(sql, tuple(params + [int(limite)]))
     resumo = resumo[OS_RESUMO_COLS]
+    resumo["km"] = resumo["km"].map(texto_km)
     visivel = format_frame(resumo).rename(columns=OS_RESUMO_NOMES)
     visivel["Número da O.S."] = visivel["Número da O.S."].map(
         lambda valor: "" if numero_os(valor) is None else str(numero_os(valor))
@@ -884,7 +888,10 @@ def aba_os() -> None:
     for registro in resumo.itertuples(index=False):
         cliente = repair_text(registro.nome_cliente) if isinstance(registro.nome_cliente, str) else ""
         placa = repair_text(registro.placa) if isinstance(registro.placa, str) else ""
-        titulo = f"OS {int(registro.id_os)} · {cliente or 'Sem cliente'} · {placa or 'sem placa'}"
+        titulo = (
+            f"OS {int(registro.id_os)} · {cliente or 'Sem cliente'} · "
+            f"{placa or 'sem placa'} · {registro.km}"
+        )
         with st.expander(titulo):
             bloco = detalhes[detalhes["id_os"] == int(registro.id_os)].copy()
             observacoes: list[str] = []
@@ -911,11 +918,13 @@ def aba_os() -> None:
             if itens.empty:
                 st.caption("Nenhum item ou serviço lançado nesta O.S.")
                 continue
+            itens.insert(0, "Km", registro.km)
             st.dataframe(
                 format_frame(itens),
                 width="stretch",
                 hide_index=True,
                 column_config=column_config(list(itens.columns)),
+                alt=f"Serviços da OS {int(registro.id_os)}",
             )
     if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
         dialogo_os()
