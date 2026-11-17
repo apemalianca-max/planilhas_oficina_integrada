@@ -4331,7 +4331,7 @@ def mostrar_lembrete_next() -> None:
     )
 
 
-def _baixa_pela_linha(chave_ids: str, chave_click: str, reabrir: bool) -> None:
+def _baixa_pela_linha(chave_ids: str, chave_click: str, reabrir: bool, ver: bool = False) -> None:
     click = st.session_state.get(chave_click)
     ids = list(st.session_state.get(chave_ids) or [])
     if click is None:
@@ -4341,7 +4341,7 @@ def _baixa_pela_linha(chave_ids: str, chave_click: str, reabrir: bool) -> None:
     except AttributeError:
         indice = click["row"]
     if isinstance(indice, int) and 0 <= indice < len(ids):
-        abrir_baixa_next(int(ids[indice]), reabrir)
+        abrir_baixa_next(int(ids[indice]), reabrir, ver)
 
 
 def click_baixar_vencidas() -> None:
@@ -4355,6 +4355,10 @@ def click_baixar_avencer() -> None:
 def click_baixar_notas() -> None:
     _baixa_pela_linha("nx_ids_notas", "nx_click_baixar_notas", False)
     fechar_notas_cliente()
+
+
+def click_ver_documento_next() -> None:
+    _baixa_pela_linha("nx_ids_recentes", "nx_click_ver", False, True)
 
 
 def click_reabrir_next() -> None:
@@ -4596,6 +4600,7 @@ def listar_next_recentes(contas: pd.DataFrame) -> None:
             "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
             "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
             "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
+            "Ver documento": ["Ver documento"] * len(contas),
             "Reabrir baixa": ["Reabrir baixa"] * len(contas),
         }
     )
@@ -4603,16 +4608,22 @@ def listar_next_recentes(contas: pd.DataFrame) -> None:
         visivel,
         width="stretch",
         hide_index=True,
-        height=420,
+        height=min(480, max(160, 48 + len(contas) * 35)),
         column_config={
-            "Código": st.column_config.TextColumn("Código"),
-            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
-            "Pagamento": st.column_config.TextColumn("Pagamento"),
-            "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f"),
+            "Código": st.column_config.TextColumn("Código", width="small"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+            "Pagamento": st.column_config.TextColumn("Pagamento", width="small"),
+            "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
+            "Ver documento": st.column_config.ButtonColumn(
+                "Ver documento",
+                type="primary",
+                width="small",
+                on_click=click_ver_documento_next,
+                key="nx_click_ver",
+            ),
             "Reabrir baixa": st.column_config.ButtonColumn(
                 "Reabrir baixa",
-                type="primary",
-                width="medium",
+                width="small",
                 on_click=click_reabrir_next,
                 key="nx_click_reabrir",
             ),
@@ -4621,15 +4632,17 @@ def listar_next_recentes(contas: pd.DataFrame) -> None:
     )
 
 
-def abrir_baixa_next(conta_id: int, reabrir: bool = False) -> None:
+def abrir_baixa_next(conta_id: int, reabrir: bool = False, ver: bool = False) -> None:
     st.session_state.next_baixa_id = int(conta_id)
     st.session_state.next_baixa_reabrir = bool(reabrir)
+    st.session_state.next_baixa_ver = bool(ver)
     st.session_state.next_baixa_init = None
 
 
 def fechar_baixa_next() -> None:
     st.session_state.next_baixa_id = None
     st.session_state.next_baixa_reabrir = False
+    st.session_state.next_baixa_ver = False
 
 
 def buscar_next(conta_id: int) -> pd.Series | None:
@@ -4808,7 +4821,10 @@ def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
     st.rerun()
 
 
-def _ficha_next(linha: pd.Series, dias: int | None) -> None:
+def _ficha_next(linha: pd.Series, dias: int | None, *, mostrar_baixa: bool = False) -> None:
+    juros = valor_banco(linha.get("juros"))
+    multa = valor_banco(linha.get("multa"))
+    valor = valor_banco(linha["valor"])
     pares = [
         ("Cliente", texto_limpo(linha["nome"]) or "—"),
         ("Código", texto_limpo(linha["codigo"]) or "—"),
@@ -4816,10 +4832,22 @@ def _ficha_next(linha: pd.Series, dias: int | None) -> None:
         ("Parcela", texto_limpo(linha["parcela"]) or "—"),
         ("Vencimento", data_br(linha["vencimento"]) or "—"),
         ("Dias vencidos", str(dias) if dias else "—"),
-        ("Valor original", brl(linha["valor"])),
+        ("Valor original", brl(valor)),
         ("Já pago", brl(linha["valor_pago"])),
     ]
-    linhas = "".join(_linha_doc(rotulo, valor) for rotulo, valor in pares)
+    if mostrar_baixa:
+        obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+        pares.extend(
+            [
+                ("Data do pagamento", data_br(linha["dt_pagamento"]) or "—"),
+                ("Juros", brl(juros)),
+                ("Multa", brl(multa)),
+                ("Juros + multa", brl(round(juros + multa, 2))),
+                ("Valor total com juros e multa", brl(round(valor + juros + multa, 2))),
+                ("Obs", obs or "—"),
+            ]
+        )
+    linhas = "".join(_linha_doc(rotulo, valor_item) for rotulo, valor_item in pares)
     st.html(
         "<style>.ficha-baixa th,.ficha-baixa td{border:1px solid #d5e4ee;padding:6px 8px;font-size:14px;text-align:left}"
         ".ficha-baixa{width:100%;border-collapse:collapse}.ficha-baixa th{width:34%;background:#f4f8fb}</style>"
@@ -4837,11 +4865,21 @@ def dialogo_baixa_next() -> None:
         st.warning("Esta conta não está mais no Next.")
         return
     reabrir = bool(st.session_state.get("next_baixa_reabrir"))
+    ver = bool(st.session_state.get("next_baixa_ver")) and not reabrir
+    dias = dias_em_atraso(linha["vencimento"], "Nao")
+    if ver:
+        st.subheader("Documento baixado")
+        _ficha_next(linha, dias, mostrar_baixa=True)
+        if st.button("Reabrir baixa", type="primary", width="stretch", key=f"nx_reabrir_doc_{conta_id}"):
+            st.session_state.next_baixa_reabrir = True
+            st.session_state.next_baixa_ver = False
+            st.session_state.next_baixa_init = None
+            st.rerun()
+        return
     _preparar_baixa_next(int(conta_id), linha, reabrir)
     if reabrir:
         st.subheader("Reabrir baixa")
-    dias = dias_em_atraso(linha["vencimento"], "Nao")
-    _ficha_next(linha, dias)
+    _ficha_next(linha, dias, mostrar_baixa=reabrir)
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
     base_legal = valor_banco(linha["valor"]) if reabrir else saldo
     pagar = _conta_a_pagar(linha)
@@ -5133,7 +5171,7 @@ def painel_contas_next() -> None:
     st.subheader("Documentos baixados")
     st.caption(
         "Documentos já baixados neste menu, da baixa mais nova para a mais antiga. "
-        "Reabrir baixa abre a mesma tela da conta para os ajustes."
+        "Ver documento abre a ficha. Reabrir baixa abre a tela para ajustar o pagamento."
     )
     if recentes.empty:
         st.info("Nenhum documento baixado neste menu.")
