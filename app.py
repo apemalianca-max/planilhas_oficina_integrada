@@ -4617,7 +4617,7 @@ def listar_next_recentes(contas: pd.DataFrame) -> None:
                 key="nx_click_reabrir",
             ),
         },
-        alt="Baixas recentes do Next",
+        alt="Documentos baixados do Next",
     )
 
 
@@ -5020,12 +5020,13 @@ def painel_contas_next() -> None:
                data_pagamento AS dt_pagamento, quitado
         FROM next_lancamento
         WHERE tipo = ?
-          AND lower(IFNULL(quitado, '')) = 'sim'
-          AND substr(CAST(data_pagamento AS TEXT), 1, 10) >= ?
-          {filtro}
-        ORDER BY data_pagamento DESC, id DESC
+          AND (
+            lower(trim(COALESCE(quitado, ''))) = 'sim'
+            OR data_pagamento IS NOT NULL
+          )
+        ORDER BY data_pagamento DESC NULLS LAST, id DESC
         """,
-        tuple([tipo, limite_recente, *params_busca]),
+        (tipo,),
     )
     mostrar_lembrete_next()
     abertas = query(
@@ -5129,16 +5130,16 @@ def painel_contas_next() -> None:
             )
 
     st.html('<div id="next-recentes" style="scroll-margin-top:80px"></div>')
-    st.subheader("Baixas recentes")
+    st.subheader("Documentos baixados")
     st.caption(
-        f"Contas quitadas nos últimos {DIAS_EDICAO_BAIXA} dias. "
+        "Documentos já baixados neste menu, da baixa mais nova para a mais antiga. "
         "Reabrir baixa abre a mesma tela da conta para os ajustes."
     )
     if recentes.empty:
-        mostrar_lembrete_next()
+        st.info("Nenhum documento baixado neste menu.")
     else:
         r1, r2 = st.columns(2)
-        r1.metric("Baixas no prazo", inteiro(len(recentes)))
+        r1.metric("Documentos baixados", inteiro(len(recentes)))
         r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
         listar_next_recentes(recentes)
 
