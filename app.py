@@ -4385,13 +4385,9 @@ def _contas_com_divida(contas: pd.DataFrame) -> pd.DataFrame:
     trabalho["chave"] = trabalho["cliente"].map(sem_acento)
     vencimento = pd.to_datetime(trabalho["vencimento"], errors="coerce")
     trabalho["eh_vencida"] = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
-    juros = trabalho["juros"] if "juros" in trabalho.columns else pd.Series(0, index=trabalho.index)
-    multa = trabalho["multa"] if "multa" in trabalho.columns else pd.Series(0, index=trabalho.index)
     trabalho["divida"] = [
-        valor_divida_exibida(valor, pago, juro, multa_valor)
-        for valor, pago, juro, multa_valor in zip(
-            trabalho["valor"], trabalho["valor_pago"], juros, multa, strict=True
-        )
+        valor_divida_exibida(valor, pago)
+        for valor, pago in zip(trabalho["valor"], trabalho["valor_pago"], strict=True)
     ]
     return trabalho
 
@@ -4687,8 +4683,12 @@ def _preparar_baixa_next(conta_id: int, linha: pd.Series, reabrir: bool) -> None
     dias = dias_em_atraso(linha["vencimento"], "Nao" if reabrir else linha["quitado"])
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
     if not tem_salvo:
-        juros, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
-    if _conta_a_pagar(linha):
+        if _conta_a_pagar(linha):
+            _, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
+            juros = 0.0
+        else:
+            juros, multa = 0.0, 0.0
+    elif _conta_a_pagar(linha):
         juros = 0.0
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
     st.session_state[f"nx_juros_{conta_id}"] = float(juros)
@@ -4845,8 +4845,8 @@ def dialogo_baixa_next() -> None:
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
     base_legal = valor_banco(linha["valor"]) if reabrir else saldo
     pagar = _conta_a_pagar(linha)
-    juros_lei, multa_lei = encargos_legais(base_legal, dias)
     if pagar:
+        _, multa_lei = encargos_legais(base_legal, dias)
         st.caption(
             "Contas a pagar não recebem juros. A multa sugerida pode ser alterada antes de salvar. "
             f"Sugestão para {dias or 0} dia(s): multa {brl(multa_lei)}."
@@ -4861,22 +4861,21 @@ def dialogo_baixa_next() -> None:
             width="stretch",
         )
     else:
-        st.caption(
-            "Multa de 2% sobre o saldo vencido, uma vez (Código de Defesa do Consumidor, art. 52, § 1º). "
-            "Juros de mora de 1% ao mês, proporcionais aos dias (mês de 30 dias), teto usual da relação de consumo "
-            "quando não há índice contratado. Os valores sugeridos podem ser alterados antes de salvar. "
-            f"Sugestão para {dias or 0} dia(s): juros {brl(juros_lei)} e multa {brl(multa_lei)}."
-        )
-        j1, j2, j3 = st.columns([1, 1, 1], vertical_alignment="bottom")
-        j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"nx_juros_{conta_id}")
-        j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
-        j3.button(
-            "Recalcular pela lei",
+        st.button(
+            "Aplicar juros e multa previstos em lei",
+            type="primary",
+            width="stretch",
             key=f"nx_recalc_{conta_id}",
             on_click=_recalcular_next,
             args=(int(conta_id), base_legal, dias, True),
-            width="stretch",
         )
+        st.caption(
+            "O botão preenche a multa de 2% e os juros de 1% ao mês, proporcionais aos dias. "
+            "Os campos podem ser alterados antes de salvar."
+        )
+        j1, j2 = st.columns(2)
+        j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"nx_juros_{conta_id}")
+        j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
     rotulo_pago = "Valor pago" if reabrir else "Valor pago nesta baixa"
     p1, p2 = st.columns(2)
     p1.number_input(
@@ -4892,10 +4891,17 @@ def dialogo_baixa_next() -> None:
     st.text_area("Obs", key=f"nx_obs_{conta_id}", height=80)
     juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
-    r1, r2, r3 = st.columns(3)
-    r1.metric("Total para quitação", brl(devido))
-    r2.metric("Valor pago acumulado", brl(pago_total))
-    r3.metric("Valor restante", brl(restante))
+    if pagar:
+        r1, r2, r3 = st.columns(3)
+        r1.metric("Total para quitação", brl(devido))
+        r2.metric("Valor pago acumulado", brl(pago_total))
+        r3.metric("Valor restante", brl(restante))
+    else:
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Juros + multa", brl(round(juros + multa, 2)))
+        r2.metric("Valor total com juros e multa", brl(devido))
+        r3.metric("Valor pago acumulado", brl(pago_total))
+        r4.metric("Valor restante", brl(restante))
     pode_quitar = pago_total + 0.004 >= devido and pago_total > 0
     pode_parcial = pago_total + 0.004 < devido and (
         valor_banco(st.session_state.get(f"nx_pago_{conta_id}")) > 0 or reabrir
@@ -5041,7 +5047,16 @@ def painel_contas_next() -> None:
     vencidas_mask = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
     vencidas = abertas.loc[vencidas_mask] if not abertas.empty else abertas
     a_vencer = abertas.loc[~vencidas_mask] if not abertas.empty else abertas
-    if tipo == "pagar":
+    if tipo == "receber":
+        if not vencidas.empty:
+            vencidas = vencidas.copy()
+            vencidas["juros"] = 0
+            vencidas["multa"] = 0
+        if not a_vencer.empty:
+            a_vencer = a_vencer.copy()
+            a_vencer["juros"] = 0
+            a_vencer["multa"] = 0
+    elif tipo == "pagar":
         if not vencidas.empty:
             vencidas = vencidas.copy()
             vencidas["juros"] = 0
