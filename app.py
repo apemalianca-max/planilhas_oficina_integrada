@@ -1298,6 +1298,7 @@ def servicos_da_os(bloco: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_os(numero: int) -> None:
+    mostrar_pedidos_da_os("oficina", str(numero))
     existe = int(scalar("SELECT COUNT(*) FROM oficina_os WHERE id_os = ?", (numero,)) or 0)
     if not existe:
         st.warning(f"A OS {numero} não está no histórico de ordens.")
@@ -4833,10 +4834,324 @@ def abrir_pedido_painel(numero: str) -> None:
     st.session_state.next_baixa_id = None
     st.session_state.nx_cli_cliente = None
     st.session_state.nx_cli_nome = None
+    st.session_state.nx_os_da_conta = False
     st.session_state.cruz_lista = "pedido"
     st.session_state.cruz_doc_tipo = "pedido"
     st.session_state.cruz_doc_id = codigo
     st.session_state.nx_pedido_da_conta = True
+
+
+def codigo_registrado(tabela: str, coluna: str, numero: str) -> str:
+    texto = str(numero or "").strip()
+    if not texto.isdigit():
+        return texto
+    if tabela not in {"next_os", "next_orcamento"} or coluna not in {"codigo", "numero"}:
+        return str(int(texto))
+    achado = query(
+        f"""
+        SELECT {coluna}
+        FROM {tabela}
+        WHERE ltrim({coluna}, '0') = ?
+        ORDER BY {coluna}
+        LIMIT 1
+        """,
+        (str(int(texto)),),
+    )
+    if achado.empty:
+        return str(int(texto))
+    return texto_limpo(achado.iat[0, 0]) or str(int(texto))
+
+
+def garantir_pedido_detalhe() -> None:
+    if st.session_state.get("pedido_detalhe_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS next_pedido_detalhe (
+                    codvenda text PRIMARY KEY,
+                    codorcamento text,
+                    codos text,
+                    os_oficina text,
+                    data date,
+                    data_saida date,
+                    hora text,
+                    valor_total double precision,
+                    quantidade double precision,
+                    marca text,
+                    numero text,
+                    observacoes text,
+                    valor_desconto double precision,
+                    nota_fiscal text,
+                    valor_desconto_total double precision,
+                    cpf text
+                )
+                """
+            )
+        )
+        conn.execute(text("ALTER TABLE next_pedido_detalhe ADD COLUMN IF NOT EXISTS os_oficina text"))
+    st.session_state.pedido_detalhe_ok = True
+
+
+def _texto_detalhe(valor) -> str:
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except TypeError:
+        pass
+    return texto_limpo(valor)
+
+
+def _chave_numero(valor) -> str:
+    texto = _texto_detalhe(valor)
+    if texto.isdigit():
+        return str(int(texto))
+    return texto
+
+
+def detalhe_do_pedido(codigo: str) -> dict:
+    garantir_pedido_detalhe()
+    chave = _chave_numero(codigo)
+    if not chave:
+        return {}
+    frame = query(
+        """
+        SELECT codvenda, codorcamento, codos, os_oficina, data, data_saida, hora,
+               valor_total, quantidade, marca, numero, observacoes,
+               valor_desconto, nota_fiscal, valor_desconto_total, cpf
+        FROM next_pedido_detalhe
+        WHERE codvenda = ?
+        """,
+        (chave,),
+    )
+    if frame.empty:
+        return {}
+    linha = frame.iloc[0]
+    return {coluna: linha[coluna] for coluna in frame.columns}
+
+
+def pedidos_ligados(coluna: str, numero: str) -> list[dict]:
+    if coluna not in {"codos", "os_oficina", "codorcamento"}:
+        return []
+    chave = _chave_numero(numero)
+    if not chave:
+        return []
+    garantir_pedido_detalhe()
+    frame = query(
+        f"""
+        SELECT codvenda, codorcamento, codos, os_oficina
+        FROM next_pedido_detalhe
+        WHERE {coluna} = ?
+        ORDER BY codvenda
+        """,
+        (chave,),
+    )
+    itens = []
+    for linha in frame.itertuples(index=False):
+        itens.append(
+            {
+                "pedido": _texto_detalhe(linha.codvenda),
+                "orcamento": _texto_detalhe(linha.codorcamento),
+                "os_next": _texto_detalhe(linha.codos),
+                "os_oficina": _texto_detalhe(linha.os_oficina),
+            }
+        )
+    return itens
+
+
+def mapa_os_dos_pedidos() -> dict[str, tuple[str, str]]:
+    garantir_pedido_detalhe()
+    frame = query(
+        """
+        SELECT codvenda, codos, os_oficina
+        FROM next_pedido_detalhe
+        WHERE COALESCE(codos, '') <> '' OR COALESCE(os_oficina, '') <> ''
+        """
+    )
+    mapa: dict[str, tuple[str, str]] = {}
+    if frame.empty:
+        return mapa
+    for pedido, os_next, os_oficina in zip(frame["codvenda"], frame["codos"], frame["os_oficina"], strict=True):
+        chave = _chave_numero(pedido)
+        if chave:
+            mapa[chave] = (_texto_detalhe(os_next), _texto_detalhe(os_oficina))
+    return mapa
+
+
+def rotulos_os_pedido(pedidos: list[str]) -> tuple[list[str], list[str]]:
+    mapa = mapa_os_dos_pedidos()
+    os_next = []
+    os_oficina = []
+    for pedido in pedidos:
+        par = mapa.get(_chave_numero(pedido), ("", ""))
+        os_next.append(par[0])
+        os_oficina.append(par[1])
+    return os_next, os_oficina
+
+
+def abrir_os_next_painel(numero: str) -> None:
+    codigo = codigo_registrado("next_os", "codigo", numero)
+    if not codigo:
+        return
+    st.session_state.next_baixa_id = None
+    st.session_state.nx_cli_cliente = None
+    st.session_state.nx_cli_nome = None
+    st.session_state.nx_pedido_da_conta = False
+    st.session_state.cruz_lista = "os"
+    st.session_state.cruz_doc_tipo = "os"
+    st.session_state.cruz_doc_id = codigo
+    st.session_state.nx_os_da_conta = True
+
+
+def abrir_os_oficina(numero: str) -> None:
+    os_numero = numero_os(numero)
+    if os_numero is None:
+        return
+    st.session_state.modulo = "os"
+    st.session_state.aba = ABA_OS
+    st.session_state.fin_os_perguntar = os_numero
+    st.session_state.fin_os_aberta = os_numero
+    st.session_state.fin_origem = "ordens"
+    st.session_state.next_baixa_id = None
+    st.session_state.nx_pedido_da_conta = False
+    st.session_state.nx_os_da_conta = False
+    st.rerun()
+
+
+def abrir_documento_next(tipo: str, numero: str) -> None:
+    if tipo == "orcamento":
+        codigo = codigo_registrado("next_orcamento", "numero", numero)
+        tela = "orcamento"
+        rotulo = "Vendas/Faturamento · Orçamento"
+    else:
+        codigo = codigo_venda_gravado(numero)
+        tipo = "pedido"
+        tela = "pedido"
+        rotulo = "Vendas/Faturamento · Pedido de venda"
+    if not codigo:
+        return
+    st.session_state.fin_os_perguntar = None
+    st.session_state.fin_os_aberta = None
+    st.session_state.modulo = "pv"
+    st.session_state.tela_next = tela
+    st.session_state.menu_next_aberto = "Vendas/Faturamento"
+    st.session_state.tela_next_rotulo = rotulo
+    st.session_state.next_baixa_id = None
+    st.session_state.nx_pedido_da_conta = False
+    st.session_state.nx_os_da_conta = False
+    st.session_state.cruz_lista = tipo
+    st.session_state.cruz_doc_tipo = tipo
+    st.session_state.cruz_doc_id = codigo
+    st.rerun()
+
+
+def _clique_os(chave_numeros: str, chave_click: str, oficina: bool):
+    def acao() -> None:
+        click = st.session_state.get(chave_click)
+        numeros = list(st.session_state.get(chave_numeros) or [])
+        if click is None:
+            return
+        try:
+            indice = click.row
+        except AttributeError:
+            indice = click["row"]
+        if not isinstance(indice, int) or not 0 <= indice < len(numeros):
+            return
+        numero = str(numeros[indice] or "").strip()
+        if not numero:
+            return
+        if oficina:
+            abrir_os_oficina(numero)
+        else:
+            abrir_os_next_painel(numero)
+
+    return acao
+
+
+def _frase_pedidos(itens: list[dict]) -> str:
+    partes = []
+    for item in itens:
+        texto = f"pedido {item['pedido']}"
+        if item.get("orcamento"):
+            texto += f" e orçamento {item['orcamento']}"
+        partes.append(texto)
+    if not partes:
+        return ""
+    if len(partes) == 1:
+        return partes[0]
+    return ", ".join(partes[:-1]) + " e " + partes[-1]
+
+
+def mostrar_pedidos_da_os(origem: str, numero: str) -> None:
+    coluna = "os_oficina" if origem == "oficina" else "codos"
+    itens = pedidos_ligados(coluna, numero)
+    if not itens:
+        return
+    if origem == "oficina":
+        destino = f"O.S. { _chave_numero(numero) } da Oficina Integrada"
+    else:
+        destino = f"O.S. NeXT { _chave_numero(numero) }"
+    ligacao = "vinculados" if len(itens) > 1 or any(item.get("orcamento") for item in itens) else "vinculado"
+    st.caption(f"{_frase_pedidos(itens).capitalize()} {ligacao} à {destino}.")
+    for item in itens:
+        with st.container(horizontal=True, gap="small"):
+            if st.button(
+                f"Ver pedido {item['pedido']}",
+                key=f"vinc_ped_{origem}_{_chave_numero(numero)}_{item['pedido']}",
+            ):
+                if origem == "oficina":
+                    abrir_documento_next("pedido", item["pedido"])
+                else:
+                    ir_documento_cruz("pedido", codigo_venda_gravado(item["pedido"]))
+            if item.get("orcamento") and st.button(
+                f"Ver orçamento {item['orcamento']}",
+                key=f"vinc_orc_{origem}_{_chave_numero(numero)}_{item['pedido']}",
+            ):
+                if origem == "oficina":
+                    abrir_documento_next("orcamento", item["orcamento"])
+                else:
+                    ir_documento_cruz(
+                        "orcamento",
+                        codigo_registrado("next_orcamento", "numero", item["orcamento"]),
+                    )
+
+
+def mostrar_vinculo_pedido(codigo: str, detalhe: dict) -> None:
+    os_next = _texto_detalhe(detalhe.get("codos"))
+    os_oficina = _texto_detalhe(detalhe.get("os_oficina"))
+    orcamento = _texto_detalhe(detalhe.get("codorcamento"))
+    if not os_next and not os_oficina and not orcamento:
+        return
+    pedido = _chave_numero(codigo)
+    frases = []
+    if os_next:
+        complemento = f"ao pedido {pedido}"
+        if orcamento:
+            complemento += f" e ao orçamento {orcamento}"
+        frases.append(f"O.S. NeXT {os_next} vinculada {complemento}.")
+    if os_oficina:
+        complemento = f"ao pedido {pedido}"
+        if orcamento:
+            complemento += f" e ao orçamento {orcamento}"
+        frases.append(f"O.S. {os_oficina} da Oficina Integrada vinculada {complemento}.")
+    if frases:
+        st.caption(" ".join(frases))
+    elif orcamento:
+        st.caption(f"Orçamento {orcamento} vinculado ao pedido {pedido}.")
+    with st.container(horizontal=True, gap="small"):
+        if os_next and st.button(f"Ver O.S. NeXT {os_next}", key=f"vinc_os_next_{pedido}"):
+            ir_documento_cruz("os", codigo_registrado("next_os", "codigo", os_next))
+        if os_oficina and st.button(
+            f"Ver O.S. Oficina Integrada {os_oficina}",
+            key=f"vinc_os_oficina_{pedido}",
+        ):
+            abrir_os_oficina(os_oficina)
+            st.rerun()
+        if orcamento and st.button(f"Ver orçamento {orcamento}", key=f"vinc_orc_ped_{pedido}"):
+            ir_documento_cruz("orcamento", codigo_registrado("next_orcamento", "numero", orcamento))
 
 
 def click_pedido_da_lista(chave_numeros: str, chave_click: str) -> None:
@@ -5035,7 +5350,10 @@ def dialogo_notas_cliente() -> None:
         else pd.Series(["—"] * len(linhas), index=linhas.index)
     )
     pedidos = [numero_pedido_texto(valor) for valor in descricoes.tolist()]
+    os_next, os_oficina = rotulos_os_pedido(pedidos)
     st.session_state.nx_pedidos_notas = pedidos
+    st.session_state.nx_os_next_notas = os_next
+    st.session_state.nx_os_oficina_notas = os_oficina
     visivel = pd.DataFrame(
         {
             "Código": linhas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -5044,6 +5362,8 @@ def dialogo_notas_cliente() -> None:
             "Situação": ["Vencida" if flag else "A vencer" for flag in linhas["eh_vencida"]],
             "Valor da dívida": linhas["divida"],
             "Pedido": pedidos,
+            "O.S. NeXT": os_next,
+            "O.S. Oficina": os_oficina,
             "Baixar": ["Baixar"] * len(linhas),
         }
     )
@@ -5064,6 +5384,20 @@ def dialogo_notas_cliente() -> None:
                 help="Abre o pedido de venda citado no histórico",
                 on_click=click_pedido_notas,
                 key="nx_click_pedido_notas",
+            ),
+            "O.S. NeXT": st.column_config.ButtonColumn(
+                "O.S. NeXT",
+                width="small",
+                help="Abre a ordem de serviço do NeXT ligada ao pedido",
+                on_click=_clique_os("nx_os_next_notas", "nx_click_os_next_notas", False),
+                key="nx_click_os_next_notas",
+            ),
+            "O.S. Oficina": st.column_config.ButtonColumn(
+                "O.S. Oficina",
+                width="small",
+                help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+                on_click=_clique_os("nx_os_oficina_notas", "nx_click_os_oficina_notas", True),
+                key="nx_click_os_oficina_notas",
             ),
             "Baixar": st.column_config.ButtonColumn(
                 "Baixar",
@@ -5143,12 +5477,19 @@ def listar_next_abertas(
     alt: str,
     vermelho: bool = False,
     mostrar_dias: bool = True,
+    mostrar_vinculo: bool = False,
 ) -> None:
     st.session_state[chave_ids] = [int(valor) for valor in contas["id"].tolist()]
     chave_pedido = f"{chave_ids}_pedidos"
     chave_pedido_click = f"{chave_ids}_pedido_click"
     pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
     st.session_state[chave_pedido] = pedidos
+    os_next: list[str] = []
+    os_oficina: list[str] = []
+    if mostrar_vinculo:
+        os_next, os_oficina = rotulos_os_pedido(pedidos)
+        st.session_state[f"{chave_ids}_os_next"] = os_next
+        st.session_state[f"{chave_ids}_os_oficina"] = os_oficina
     colunas = {
         "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
         "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -5166,6 +5507,11 @@ def listar_next_abertas(
         "Pedido": pedidos,
         "Baixar": ["Baixar"] * len(contas),
     }
+    if mostrar_vinculo:
+        colunas["O.S. NeXT"] = os_next
+        colunas["O.S. Oficina"] = os_oficina
+        baixar = colunas.pop("Baixar")
+        colunas["Baixar"] = baixar
     if mostrar_dias:
         colunas = {
             "Código": colunas["Código"],
@@ -5179,8 +5525,16 @@ def listar_next_abertas(
             "Pedido": colunas["Pedido"],
             "Baixar": colunas["Baixar"],
         }
+        if mostrar_vinculo:
+            colunas = {
+                **{chave: colunas[chave] for chave in list(colunas) if chave not in {"Baixar", "O.S. NeXT", "O.S. Oficina"}},
+                "O.S. NeXT": os_next,
+                "O.S. Oficina": os_oficina,
+                "Baixar": colunas["Baixar"],
+            }
     visivel = pd.DataFrame(colunas)
-    tabela = pintar_faixa(visivel, VERMELHO, {"Baixar", "Pedido"}) if vermelho else visivel
+    exceto = {"Baixar", "Pedido", "O.S. NeXT", "O.S. Oficina"}
+    tabela = pintar_faixa(visivel, VERMELHO, exceto) if vermelho else visivel
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
         "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
@@ -5201,6 +5555,21 @@ def listar_next_abertas(
             key=chave_click,
         ),
     }
+    if mostrar_vinculo:
+        config["O.S. NeXT"] = st.column_config.ButtonColumn(
+            "O.S. NeXT",
+            width="small",
+            help="Abre a ordem de serviço do NeXT ligada ao pedido",
+            on_click=_clique_os(f"{chave_ids}_os_next", f"{chave_ids}_os_next_click", False),
+            key=f"{chave_ids}_os_next_click",
+        )
+        config["O.S. Oficina"] = st.column_config.ButtonColumn(
+            "O.S. Oficina",
+            width="small",
+            help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+            on_click=_clique_os(f"{chave_ids}_os_oficina", f"{chave_ids}_os_oficina_click", True),
+            key=f"{chave_ids}_os_oficina_click",
+        )
     if mostrar_dias:
         config["Dias vencidos"] = st.column_config.NumberColumn("Dias vencidos", format="%d", width="small")
     st.dataframe(
@@ -5242,52 +5611,82 @@ def listar_pagar_a_vencer_por_mes(contas: pd.DataFrame, total_lista) -> None:
             )
 
 
-def listar_next_recentes(contas: pd.DataFrame) -> None:
+def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False) -> None:
     st.session_state.nx_ids_recentes = [int(valor) for valor in contas["id"].tolist()]
     pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
     st.session_state.nx_pedidos_recentes = pedidos
-    visivel = pd.DataFrame(
-        {
-            "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
-            "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
-            "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
-            "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
+    colunas = {
+        "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
+        "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
+        "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
+        "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
+        "Pedido": pedidos,
+        "Ver documento": ["Ver documento"] * len(contas),
+        "Reabrir baixa": ["Reabrir baixa"] * len(contas),
+    }
+    if mostrar_vinculo:
+        os_next, os_oficina = rotulos_os_pedido(pedidos)
+        st.session_state.nx_os_next_recentes = os_next
+        st.session_state.nx_os_oficina_recentes = os_oficina
+        colunas = {
+            "Código": colunas["Código"],
+            "Descrição": colunas["Descrição"],
+            "Pagamento": colunas["Pagamento"],
+            "Valor pago": colunas["Valor pago"],
             "Pedido": pedidos,
-            "Ver documento": ["Ver documento"] * len(contas),
-            "Reabrir baixa": ["Reabrir baixa"] * len(contas),
+            "O.S. NeXT": os_next,
+            "O.S. Oficina": os_oficina,
+            "Ver documento": colunas["Ver documento"],
+            "Reabrir baixa": colunas["Reabrir baixa"],
         }
-    )
+    visivel = pd.DataFrame(colunas)
+    config = {
+        "Código": st.column_config.TextColumn("Código", width="small"),
+        "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+        "Pagamento": st.column_config.TextColumn("Pagamento", width="small"),
+        "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
+        "Pedido": st.column_config.ButtonColumn(
+            "Pedido",
+            width="small",
+            help="Abre o pedido de venda citado na descrição",
+            on_click=click_pedido_recentes,
+            key="nx_click_pedido_recentes",
+        ),
+        "Ver documento": st.column_config.ButtonColumn(
+            "Ver documento",
+            type="primary",
+            width="small",
+            on_click=click_ver_documento_next,
+            key="nx_click_ver",
+        ),
+        "Reabrir baixa": st.column_config.ButtonColumn(
+            "Reabrir baixa",
+            width="small",
+            on_click=click_reabrir_next,
+            key="nx_click_reabrir",
+        ),
+    }
+    if mostrar_vinculo:
+        config["O.S. NeXT"] = st.column_config.ButtonColumn(
+            "O.S. NeXT",
+            width="small",
+            help="Abre a ordem de serviço do NeXT ligada ao pedido",
+            on_click=_clique_os("nx_os_next_recentes", "nx_click_os_next_recentes", False),
+            key="nx_click_os_next_recentes",
+        )
+        config["O.S. Oficina"] = st.column_config.ButtonColumn(
+            "O.S. Oficina",
+            width="small",
+            help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+            on_click=_clique_os("nx_os_oficina_recentes", "nx_click_os_oficina_recentes", True),
+            key="nx_click_os_oficina_recentes",
+        )
     st.dataframe(
         visivel,
         width="stretch",
         hide_index=True,
         height=min(480, max(160, 48 + len(contas) * 35)),
-        column_config={
-            "Código": st.column_config.TextColumn("Código", width="small"),
-            "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
-            "Pagamento": st.column_config.TextColumn("Pagamento", width="small"),
-            "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
-            "Pedido": st.column_config.ButtonColumn(
-                "Pedido",
-                width="small",
-                help="Abre o pedido de venda citado na descrição",
-                on_click=click_pedido_recentes,
-                key="nx_click_pedido_recentes",
-            ),
-            "Ver documento": st.column_config.ButtonColumn(
-                "Ver documento",
-                type="primary",
-                width="small",
-                on_click=click_ver_documento_next,
-                key="nx_click_ver",
-            ),
-            "Reabrir baixa": st.column_config.ButtonColumn(
-                "Reabrir baixa",
-                width="small",
-                on_click=click_reabrir_next,
-                key="nx_click_reabrir",
-            ),
-        },
+        column_config=config,
         alt="Documentos baixados do Next",
     )
 
@@ -5298,6 +5697,7 @@ def abrir_baixa_next(conta_id: int, reabrir: bool = False, ver: bool = False) ->
     st.session_state.next_baixa_ver = bool(ver)
     st.session_state.next_baixa_init = None
     st.session_state.nx_pedido_da_conta = False
+    st.session_state.nx_os_da_conta = False
 
 
 def fechar_baixa_next() -> None:
@@ -5942,6 +6342,11 @@ def _painel_operacao_contas(tipo: str) -> None:
             st.caption(
                 "Estas contas já passaram do vencimento e ainda não foram quitadas. "
                 "Pedido abre o pedido de venda. Baixar abre juros e multa."
+                + (
+                    " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada."
+                    if tipo == "receber"
+                    else ""
+                )
             )
             listar_next_abertas(
                 vencidas,
@@ -5950,6 +6355,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 ao_clicar=click_baixar_vencidas,
                 alt="Contas vencidas do Next",
                 vermelho=True,
+                mostrar_vinculo=tipo == "receber",
             )
     with coluna_avencer:
         st.html('<div id="next-avencer" style="scroll-margin-top:80px"></div>')
@@ -5963,6 +6369,11 @@ def _painel_operacao_contas(tipo: str) -> None:
             st.caption(
                 "No dia seguinte ao vencimento, se não forem quitadas, passam para a lista vermelha. "
                 "Pedido abre o pedido de venda."
+                + (
+                    " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada."
+                    if tipo == "receber"
+                    else ""
+                )
             )
             listar_next_abertas(
                 a_vencer,
@@ -5970,6 +6381,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 chave_click="nx_click_baixar_avencer",
                 ao_clicar=click_baixar_avencer,
                 alt="Contas a vencer do Next",
+                mostrar_vinculo=tipo == "receber",
             )
     st.html('<div id="next-recentes" style="scroll-margin-top:80px"></div>')
     st.subheader("Documentos baixados")
@@ -5983,7 +6395,7 @@ def _painel_operacao_contas(tipo: str) -> None:
         r1, r2 = st.columns(2)
         r1.metric("Documentos baixados", inteiro(len(recentes)))
         r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
-        listar_next_recentes(recentes)
+        listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber")
     st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
     st.subheader("Todas as contas")
     st.caption(
@@ -6171,6 +6583,8 @@ def painel_contas_next() -> None:
         "Valor da Baixa",
         "Pedido",
     ]
+    if tipo == "receber":
+        colunas.extend(["O.S. NeXT", "O.S. Oficina"])
     buscar = bool(st.session_state.get("nx_busca_feita")) and st.session_state.get("nx_busca_tipo") == tipo
     frame = pd.DataFrame()
     if buscar:
@@ -6195,25 +6609,35 @@ def painel_contas_next() -> None:
         st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
         st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
         st.session_state.nx_pedidos_lancamento = pedidos
-        visivel = pd.DataFrame(
-            {
-                "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
-                "Duplicata": frame["duplicata"].map(lambda valor: texto_limpo(valor) or "—"),
-                "Data Vencto.": frame["vencimento"].map(data_br),
-                "Nome/Razão Social": frame["nome"].map(lambda valor: texto_limpo(valor) or "—"),
-                "Data Emissão": "",
-                "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
-                "Data pagto.": frame["data_pagamento"].map(data_br),
-                "Valor da dívida": divida,
-                "Valor da Baixa": pago.where(pago > 0, baixa_planilha),
-                "Pedido": pedidos,
-                "Documento": ["Ver documento" if flag else "Baixar" for flag in quitado_flag],
-            }
-        )
+        grade = {
+            "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Duplicata": frame["duplicata"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Data Vencto.": frame["vencimento"].map(data_br),
+            "Nome/Razão Social": frame["nome"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Data Emissão": "",
+            "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
+            "Data pagto.": frame["data_pagamento"].map(data_br),
+            "Valor da dívida": divida,
+            "Valor da Baixa": pago.where(pago > 0, baixa_planilha),
+            "Pedido": pedidos,
+        }
+        if tipo == "receber":
+            os_next, os_oficina = rotulos_os_pedido(pedidos)
+            st.session_state.nx_os_next_lancamento = os_next
+            st.session_state.nx_os_oficina_lancamento = os_oficina
+            grade["O.S. NeXT"] = os_next
+            grade["O.S. Oficina"] = os_oficina
+        grade["Documento"] = ["Ver documento" if flag else "Baixar" for flag in quitado_flag]
+        visivel = pd.DataFrame(grade)
         st.caption(
             "Valor da dívida é o valor do lançamento. Valor da Baixa é o valor pago neste painel. "
             "Pedido abre o pedido de venda. Baixar abre juros, multa e o pagamento. "
             "Ver documento abre a ficha do que já foi baixado."
+            + (
+                " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada."
+                if tipo == "receber"
+                else ""
+            )
         )
         st.dataframe(
             visivel,
@@ -6229,6 +6653,20 @@ def painel_contas_next() -> None:
                     help="Abre o pedido de venda citado no histórico",
                     on_click=click_pedido_lancamento,
                     key="nx_click_pedido_grade",
+                ),
+                "O.S. NeXT": st.column_config.ButtonColumn(
+                    "O.S. NeXT",
+                    width="small",
+                    help="Abre a ordem de serviço do NeXT ligada ao pedido",
+                    on_click=_clique_os("nx_os_next_lancamento", "nx_click_os_next_lancamento", False),
+                    key="nx_click_os_next_lancamento",
+                ),
+                "O.S. Oficina": st.column_config.ButtonColumn(
+                    "O.S. Oficina",
+                    width="small",
+                    help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+                    on_click=_clique_os("nx_os_oficina_lancamento", "nx_click_os_oficina_lancamento", True),
+                    key="nx_click_os_oficina_lancamento",
                 ),
                 "Documento": st.column_config.ButtonColumn(
                     "Documento",
@@ -6277,6 +6715,8 @@ def painel_contas_next() -> None:
     _painel_operacao_contas(tipo)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
+    elif st.session_state.get("nx_os_da_conta") and st.session_state.get("cruz_doc_id"):
+        dialogo_documento_cruz()
     elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
 
@@ -6644,6 +7084,8 @@ def clientes_next() -> None:
     mostrar_totais_cliente(base)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
+    elif st.session_state.get("nx_os_da_conta") and st.session_state.get("cruz_doc_id"):
+        dialogo_documento_cruz()
     elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
 
@@ -6674,6 +7116,7 @@ def abrir_documento_cruz() -> None:
 def fechar_documento_cruz() -> None:
     st.session_state.cruz_doc_id = None
     st.session_state.nx_pedido_da_conta = False
+    st.session_state.nx_os_da_conta = False
 
 
 def ir_documento_cruz(tipo: str, codigo: str) -> None:
@@ -7415,6 +7858,16 @@ def ficha_pedido(codigo: str) -> None:
     if not notas.empty:
         nota_numero = texto_limpo(notas.iloc[0]["nota"])
         orcamento_numero = texto_limpo(notas.iloc[0]["orcamento"])
+    detalhe = detalhe_do_pedido(codigo)
+    if _texto_detalhe(detalhe.get("codorcamento")):
+        orcamento_numero = _texto_detalhe(detalhe.get("codorcamento"))
+    if _texto_detalhe(detalhe.get("nota_fiscal")):
+        nota_numero = _texto_detalhe(detalhe.get("nota_fiscal"))
+    os_next = _texto_detalhe(detalhe.get("codos"))
+    data_emissao = data_br(detalhe.get("data")) or data_br(cab["data"])
+    data_entrega = data_br(detalhe.get("data_saida"))
+    hora_pedido = _texto_detalhe(detalhe.get("hora"))
+    observacao = _texto_detalhe(detalhe.get("observacoes"))
     chave = sem_acento(codigo).replace(" ", "_")
     liberado = indagar_edicao("pedido", codigo, f"o pedido {codigo}")
     _preparar_campos("pedido", codigo, liberado)
@@ -7426,13 +7879,13 @@ def ficha_pedido(codigo: str) -> None:
         with c2:
             _campo_pedido("Orçamento", orcamento_numero, f"ped_{chave}_orc", campo="orcamento")
         with c3:
-            _campo_pedido("O.S.", "", f"ped_{chave}_os", campo="os")
+            _campo_pedido("O.S. NeXT", os_next, f"ped_{chave}_os", campo="os")
         with c4:
-            _campo_pedido("Data emissão", data_br(cab["data"]), f"ped_{chave}_emissao", campo="emissao")
+            _campo_pedido("Data emissão", data_emissao, f"ped_{chave}_emissao", campo="emissao")
         with c5:
-            _campo_pedido("Data entrega", "", f"ped_{chave}_entrega", campo="entrega")
+            _campo_pedido("Data entrega", data_entrega, f"ped_{chave}_entrega", campo="entrega")
         with c6:
-            _campo_pedido("Hora", "", f"ped_{chave}_hora", campo="hora")
+            _campo_pedido("Hora", hora_pedido, f"ped_{chave}_hora", campo="hora")
         with c7:
             _campo_pedido("Status do pedido", cab["status"], f"ped_{chave}_status", campo="status")
         c1, c2, c3, c4 = st.columns([1, 3, 1.2, 2], vertical_alignment="bottom")
@@ -7462,7 +7915,19 @@ def ficha_pedido(codigo: str) -> None:
             _campo_pedido("Nome/razão social do transportador", "", f"ped_{chave}_transp", campo="transportador")
         with c4:
             _campo_pedido("Valor do frete", "", f"ped_{chave}_frete", campo="frete")
-        _campo_pedido("Observações do pedido", "", f"ped_{chave}_obs", campo="obs")
+        _campo_pedido("Observações do pedido", observacao, f"ped_{chave}_obs", campo="obs")
+        extras = [
+            ("CPF", detalhe.get("cpf"), "cpf"),
+            ("Quantidade", detalhe.get("quantidade"), "quantidade_detalhe"),
+            ("Marca", detalhe.get("marca"), "marca_detalhe"),
+            ("Número", detalhe.get("numero"), "numero_detalhe"),
+        ]
+        extras = [item for item in extras if _texto_detalhe(item[1])]
+        if extras:
+            colunas_extra = st.columns(len(extras))
+            for coluna, (rotulo, valor, campo) in zip(colunas_extra, extras, strict=True):
+                with coluna:
+                    _campo_pedido(rotulo, _texto_detalhe(valor), f"ped_{chave}_{campo}", campo=campo)
         if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_ped_{chave}"):
             valores = _valores_editados()
             gravar_campos("pedido", codigo, valores)
@@ -7470,6 +7935,7 @@ def ficha_pedido(codigo: str) -> None:
             st.session_state.nx_editavel = False
             st.success("Pedido gravado.")
             st.rerun()
+    mostrar_vinculo_pedido(codigo, detalhe)
     st.session_state.nx_editavel = False
     painel_do_cliente(cliente, f"ped_{chave}")
     linhas = []
@@ -7544,9 +8010,13 @@ def ficha_pedido(codigo: str) -> None:
         t1, t2, t3, t4, t5 = st.columns(5)
         t1.metric("Itens", f"{float(grade['Qtde.'].sum()):,.3f}".replace(",", "X").replace(".", ",").replace("X", "."))
         t2.metric("Total produtos", brl(total_produtos))
-        t3.metric("Total serviços", brl(0))
-        t4.metric("Desconto", "—")
-        t5.metric("Total do pedido", brl(total_produtos))
+        desconto_total = detalhe.get("valor_desconto_total")
+        total_planilha = detalhe.get("valor_total")
+        desconto_vazio = desconto_total is None or pd.isna(desconto_total)
+        total_vazio = total_planilha is None or pd.isna(total_planilha)
+        t3.metric("Total serviços", "—")
+        t4.metric("Desconto", "—" if desconto_vazio else brl(desconto_total))
+        t5.metric("Total do pedido", brl(total_produtos if total_vazio else total_planilha))
         if tem_custo and custo:
             lucro = round(total_produtos - custo, 2)
             margem = round(lucro / custo * 100, 2)
@@ -7555,8 +8025,8 @@ def ficha_pedido(codigo: str) -> None:
             m2.metric("Margem sobre o custo atual (R$)", brl(lucro))
             st.caption("A margem usa o custo de compra gravado hoje no cadastro do produto, não o custo do dia da venda.")
         st.caption(
-            "Hora, data de entrega, contato, tabela de preços, frete, observação, impostos e desconto "
-            "não vieram na carga do pedido. Estoque e local são os do cadastro atual."
+            "Hora, entrega, observação, desconto, nota e total do pedido vêm da planilha de detalhes quando ela traz o campo. "
+            "As linhas de serviço e os impostos não vieram nessa planilha. Estoque e local são os do cadastro atual."
         )
     if not notas.empty:
         for nota in notas.itertuples(index=False):
@@ -7579,7 +8049,8 @@ def ficha_os(codigo: str) -> None:
         """,
         (codigo,),
     )
-    st.subheader("Ordem de serviço")
+    st.subheader("Ordem de serviço NeXT")
+    mostrar_pedidos_da_os("next", codigo)
     if cab.empty:
         st.info("Ordem de serviço não encontrada.")
         return
@@ -7732,6 +8203,22 @@ def dialogo_documento_cruz() -> None:
         for nota in notas.itertuples(index=False):
             if st.button(f"Abrir nota {nota.nota or nota.codigo}", key=f"cruz_ir_nf_{nota.codigo}"):
                 ir_documento_cruz("saida", str(nota.codigo))
+        ligados = pedidos_ligados("codorcamento", codigo)
+        if any(item["os_next"] or item["os_oficina"] for item in ligados):
+            st.caption(f"Pedido e ordem vinculados ao orçamento {codigo}.")
+        for item in ligados:
+            with st.container(horizontal=True, gap="small"):
+                if item["os_next"] and st.button(
+                    f"Ver O.S. NeXT {item['os_next']}",
+                    key=f"vinc_orc_osnext_{codigo}_{item['pedido']}",
+                ):
+                    ir_documento_cruz("os", codigo_registrado("next_os", "codigo", item["os_next"]))
+                if item["os_oficina"] and st.button(
+                    f"Ver O.S. Oficina Integrada {item['os_oficina']}",
+                    key=f"vinc_orc_osofi_{codigo}_{item['pedido']}",
+                ):
+                    abrir_os_oficina(item["os_oficina"])
+                    st.rerun()
         return
     if tipo == "saida":
         cab = query(
