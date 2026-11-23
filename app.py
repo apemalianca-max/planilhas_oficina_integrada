@@ -1318,6 +1318,16 @@ def render_os(numero: int) -> None:
         (numero,),
     )
     linha = cab.iloc[0]
+    vinculos = codigos_do_vinculo(pedidos_ligados("os_oficina", str(numero)))
+    with st.container(border=True):
+        st.markdown("**Vínculos**")
+        mostrar_codigos_vinculados(
+            f"ofi_{numero}",
+            vinculos["pedido"],
+            vinculos["orcamento"],
+            vinculos["os_next"],
+            _juntar_codigos([str(numero), vinculos["os_oficina"]]),
+        )
     st.table(
         {
             "Cliente": texto_limpo(linha.nome_cliente),
@@ -1385,7 +1395,7 @@ def dialogo_os() -> None:
     if st.button(rotulo_voltar, type="primary", key="voltar_fin_os"):
         voltar_financeiro()
         st.rerun()
-    st.subheader(f"OS {numero}")
+    st.subheader(f"O.S. O. Integrada {numero}")
     render_os(numero)
 
 
@@ -2830,7 +2840,7 @@ def dialogo_dividas() -> None:
             st.session_state.cli_os = None
             st.session_state.cli_os_aberta = None
             st.rerun(scope="fragment")
-        st.subheader(f"OS {numero}")
+        st.subheader(f"O.S. O. Integrada {numero}")
         render_os(numero)
         return
     if numero is not None:
@@ -4927,6 +4937,28 @@ def garantir_os_detalhe() -> None:
     st.session_state.os_detalhe_ok = True
 
 
+def garantir_orcamento_item() -> None:
+    if st.session_state.get("orcamento_item_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS next_orcamento_item (
+                    id bigserial PRIMARY KEY,
+                    codorcamento text NOT NULL,
+                    codproduto text NOT NULL,
+                    quantidade double precision,
+                    preco double precision,
+                    desconto double precision
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS next_orcamento_item_orc ON next_orcamento_item (codorcamento)"))
+    st.session_state.orcamento_item_ok = True
+
+
 def _texto_detalhe(valor) -> str:
     if valor is None:
         return ""
@@ -5102,6 +5134,38 @@ def _clique_os(chave_numeros: str, chave_click: str, oficina: bool):
             abrir_os_next_painel(numero)
 
     return acao
+
+
+def _juntar_codigos(valores) -> str:
+    vistos = []
+    for valor in valores:
+        texto = _texto_detalhe(valor)
+        if texto.isdigit():
+            texto = str(int(texto))
+        if texto and texto not in vistos:
+            vistos.append(texto)
+    return ", ".join(vistos)
+
+
+def codigos_do_vinculo(itens: list[dict]) -> dict[str, str]:
+    return {
+        "pedido": _juntar_codigos(item.get("pedido") for item in itens),
+        "orcamento": _juntar_codigos(item.get("orcamento") for item in itens),
+        "os_next": _juntar_codigos(item.get("os_next") for item in itens),
+        "os_oficina": _juntar_codigos(item.get("os_oficina") for item in itens),
+    }
+
+
+def mostrar_codigos_vinculados(chave: str, pedido: str, orcamento: str, os_next: str, os_oficina: str) -> None:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.text_input("Pedido de venda", value=pedido or "—", disabled=True, key=f"{chave}_vped")
+    with c2:
+        st.text_input("Orçamento", value=orcamento or "—", disabled=True, key=f"{chave}_vorc")
+    with c3:
+        st.text_input("O.S. NeXT", value=os_next or "—", disabled=True, key=f"{chave}_vnext")
+    with c4:
+        st.text_input("O.S. O. Integrada", value=os_oficina or "—", disabled=True, key=f"{chave}_vofi")
 
 
 def _frase_pedidos(itens: list[dict]) -> str:
@@ -7917,6 +7981,7 @@ def ficha_pedido(codigo: str) -> None:
     if _texto_detalhe(detalhe.get("nota_fiscal")):
         nota_numero = _texto_detalhe(detalhe.get("nota_fiscal"))
     os_next = _texto_detalhe(detalhe.get("codos"))
+    os_oficina = _texto_detalhe(detalhe.get("os_oficina"))
     data_emissao = data_br(detalhe.get("data")) or data_br(cab["data"])
     data_entrega = data_br(detalhe.get("data_saida"))
     hora_pedido = _texto_detalhe(detalhe.get("hora"))
@@ -7926,20 +7991,21 @@ def ficha_pedido(codigo: str) -> None:
     _preparar_campos("pedido", codigo, liberado)
     with st.container(border=True):
         st.markdown("**Dados do pedido**")
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        mostrar_codigos_vinculados(
+            f"ped_{chave}",
+            _chave_numero(codigo),
+            orcamento_numero,
+            os_next,
+            os_oficina,
+        )
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
-            _campo_pedido("Pedido", codigo, f"ped_{chave}_num", travado=True, campo="numero")
-        with c2:
-            _campo_pedido("Orçamento", orcamento_numero, f"ped_{chave}_orc", campo="orcamento")
-        with c3:
-            _campo_pedido("O.S. NeXT", os_next, f"ped_{chave}_os", campo="os")
-        with c4:
             _campo_pedido("Data emissão", data_emissao, f"ped_{chave}_emissao", campo="emissao")
-        with c5:
+        with c2:
             _campo_pedido("Data entrega", data_entrega, f"ped_{chave}_entrega", campo="entrega")
-        with c6:
+        with c3:
             _campo_pedido("Hora", hora_pedido, f"ped_{chave}_hora", campo="hora")
-        with c7:
+        with c4:
             _campo_pedido("Status do pedido", cab["status"], f"ped_{chave}_status", campo="status")
         c1, c2, c3, c4 = st.columns([1, 3, 1.2, 2], vertical_alignment="bottom")
         with c1:
@@ -8168,6 +8234,61 @@ def _grade_produtos_os(codigo: str) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+def _grade_produtos_orcamento(codigo: str) -> pd.DataFrame:
+    pecas = query(
+        """
+        SELECT i.codproduto, i.quantidade, i.preco, i.desconto,
+               p.descricao, p.unidade, p.marca, p.grupo, p.cod_original, p.cod_fabricante,
+               p.local_estoque, p.estoque
+        FROM next_orcamento_item i
+        LEFT JOIN next_produto p ON p.codigo = i.codproduto
+        WHERE i.codorcamento = ?
+        ORDER BY i.id
+        """,
+        (codigo,),
+    )
+    pedidos = query(
+        """
+        SELECT v.produto, v.cod_fabricante
+        FROM next_venda_item v
+        JOIN next_pedido_detalhe d ON ltrim(COALESCE(v.codvenda, ''), '0') = d.codvenda
+        WHERE d.codorcamento = ?
+        """,
+        (codigo,),
+    )
+    pares = [
+        (texto_limpo(item.produto), texto_limpo(item.cod_fabricante))
+        for item in pedidos.itertuples(index=False)
+    ]
+    linhas = []
+    for item in pecas.itertuples(index=False):
+        qtd = 0.0 if item.quantidade is None or pd.isna(item.quantidade) else float(item.quantidade)
+        preco = 0.0 if item.preco is None or pd.isna(item.preco) else float(item.preco)
+        desconto = 0.0 if item.desconto is None or pd.isna(item.desconto) else float(item.desconto)
+        linhas.append(
+            {
+                "Código": texto_limpo(item.codproduto),
+                "Descrição do produto": _descricao_peca_os(
+                    texto_limpo(item.descricao),
+                    texto_limpo(item.cod_fabricante),
+                    pares,
+                ),
+                "UN": texto_limpo(item.unidade),
+                "Qtde.": qtd,
+                "Preço unitário": preco,
+                "Desc.": desconto,
+                "Valor": round(qtd * preco - desconto, 2),
+                "Marca": texto_limpo(item.marca),
+                "Grupo": texto_limpo(item.grupo),
+                "Local": texto_limpo(item.local_estoque),
+                "Qtde. atual": None if item.estoque is None or pd.isna(item.estoque) else float(item.estoque),
+                "Cód. original": texto_limpo(item.cod_original),
+                "Cód. fabricante": texto_limpo(item.cod_fabricante),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
 def ficha_os(codigo: str) -> None:
     garantir_os_detalhe()
     cab = query(
@@ -8194,9 +8315,17 @@ def ficha_os(codigo: str) -> None:
     _preparar_campos("os", codigo, liberado)
     with st.container(border=True):
         st.markdown("**Dados da ordem**")
+        vinculos = codigos_do_vinculo(pedidos_ligados("codos", codigo))
+        mostrar_codigos_vinculados(
+            f"os_{chave}",
+            vinculos["pedido"],
+            vinculos["orcamento"],
+            _juntar_codigos([codigo, vinculos["os_next"]]),
+            vinculos["os_oficina"],
+        )
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            _campo_pedido("Número", linha["codigo"], f"os_{chave}_num", travado=True, campo="numero")
+            _campo_pedido("O.S. NeXT", linha["codigo"], f"os_{chave}_num", travado=True, campo="numero")
         with c2:
             _campo_pedido("Data de emissão", data_br(linha["emissao"]), f"os_{chave}_emissao", campo="emissao")
         with c3:
@@ -8308,25 +8437,53 @@ def dialogo_documento_cruz() -> None:
         if cab.empty:
             st.info("Orçamento não encontrado.")
             return
+        vinculos = codigos_do_vinculo(pedidos_ligados("codorcamento", codigo))
+        with st.container(border=True):
+            st.markdown("**Vínculos**")
+            mostrar_codigos_vinculados(
+                f"orc_{_chave_numero(codigo)}",
+                vinculos["pedido"],
+                _juntar_codigos([codigo, vinculos["orcamento"]]),
+                vinculos["os_next"],
+                vinculos["os_oficina"],
+            )
         st.caption(
             f"{texto_limpo(cab.iat[0, 2]) or 'Sem cliente'} · {data_br(cab.iat[0, 1]) or 'sem data'} · "
             f"{texto_limpo(cab.iat[0, 3]) or 'sem status'} · {texto_limpo(cab.iat[0, 4]) or 'sem condição'}"
         )
         st.metric("Valor do orçamento", brl(cab.iat[0, 6]))
-        pecas = query(
-            """
-            SELECT v.data, v.produto, v.quantidade, v.preco, v.marca
-            FROM next_venda_item v
-            JOIN next_nf_saida n ON n.nota = v.nota
-            WHERE n.orcamento = ?
-              AND TRIM(COALESCE(v.nota, '')) <> ''
-            ORDER BY v.data, v.produto
-            """,
-            (codigo,),
-        )
+        garantir_orcamento_item()
+        grade_produtos = _grade_produtos_orcamento(codigo)
         st.subheader("Peças")
-        st.caption("Peças dos pedidos cuja nota fiscal aponta para este orçamento.")
-        _tabela_pecas(pecas)
+        if grade_produtos.empty:
+            st.info("Este orçamento não tem peças na planilha de produtos.", title="Peças")
+        else:
+            st.dataframe(
+                grade_produtos,
+                width="stretch",
+                hide_index=True,
+                height=min(420, max(180, 48 + len(grade_produtos) * 36)),
+                column_config={
+                    "Código": st.column_config.TextColumn("Código", width="small"),
+                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width="large"),
+                    "UN": st.column_config.TextColumn("UN", width="small"),
+                    "Qtde.": st.column_config.NumberColumn("Qtde.", format="%.3f", width="small"),
+                    "Preço unitário": st.column_config.NumberColumn("Preço unitário", format="R$ %.2f"),
+                    "Desc.": st.column_config.NumberColumn("Desc.", format="R$ %.2f", width="small"),
+                    "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                    "Marca": st.column_config.TextColumn("Marca"),
+                    "Grupo": st.column_config.TextColumn("Grupo"),
+                    "Local": st.column_config.TextColumn("Local", width="small"),
+                    "Qtde. atual": st.column_config.NumberColumn("Qtde. atual", format="%.3f"),
+                    "Cód. original": st.column_config.TextColumn("Cód. original"),
+                    "Cód. fabricante": st.column_config.TextColumn("Cód. fabricante"),
+                },
+                alt=f"Produtos do orçamento {codigo}",
+            )
+            st.caption(
+                "As peças vêm da planilha de produtos do orçamento. A descrição é a do pedido vinculado quando a peça é a mesma. "
+                "O valor da linha é quantidade vezes preço, menos o desconto. O valor do orçamento continua o do relatório."
+            )
         notas = query(
             """
             SELECT codigo, data, nota, valor, status
@@ -8554,13 +8711,15 @@ def painel_cruzamento(mostrar_menu: bool = True) -> None:
             )
             pessoa = "Cliente"
         elif ativa == "orcamento":
+            garantir_orcamento_item()
             where, params = _where_doc(termo, "o.numero", ["o.cliente"])
+            if termo:
+                where += " OR EXISTS (SELECT 1 FROM next_orcamento_item i JOIN next_produto p ON p.codigo = i.codproduto WHERE i.codorcamento = o.numero AND " + comparar_busca("p.descricao") + ")"
+                params.append(like(termo))
             lista = query(
                 f"""
                 SELECT o.numero AS codigo, o.emissao AS data, o.cliente AS pessoa, o.status AS situacao,
-                       (SELECT COUNT(*) FROM next_venda_item v
-                        JOIN next_nf_saida nf ON nf.nota = v.nota
-                        WHERE nf.orcamento = o.numero AND TRIM(COALESCE(v.nota, '')) <> '') AS itens,
+                       (SELECT COUNT(*) FROM next_orcamento_item i WHERE i.codorcamento = o.numero) AS itens,
                        o.valor AS valor
                 FROM next_orcamento o
                 {where}
