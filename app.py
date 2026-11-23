@@ -4393,6 +4393,20 @@ def click_abrir_busca_conta() -> None:
     _baixa_pela_linha("nx_ids_busca", "nx_click_busca", False)
 
 
+def click_lancamento_grade() -> None:
+    click = st.session_state.get("nx_click_lancamento")
+    ids = list(st.session_state.get("nx_ids_lancamento") or [])
+    modos = list(st.session_state.get("nx_modo_lancamento") or [])
+    if click is None:
+        return
+    try:
+        indice = click.row
+    except AttributeError:
+        indice = click["row"]
+    if isinstance(indice, int) and 0 <= indice < len(ids):
+        abrir_baixa_next(int(ids[indice]), False, modos[indice] == "ver")
+
+
 def click_abrir_pessoa() -> None:
     papel = st.session_state.get("nx_pessoa_papel") or "cliente"
     click = st.session_state.get(f"nx_click_pessoa_{papel}")
@@ -5289,6 +5303,230 @@ def _html_lancamentos(frame: pd.DataFrame, titulo: str) -> str:
     return "".join(linhas)
 
 
+def _painel_operacao_contas(tipo: str) -> None:
+    termo = pesquisa_next("fin")
+    params_busca: list = []
+    filtro = clausula_pesquisa_next(termo, params_busca)
+    limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
+    descricao_sql = "COALESCE(NULLIF(TRIM(historico), ''), NULLIF(TRIM(nome), ''))"
+    recentes = query(
+        f"""
+        SELECT id, codigo, {descricao_sql} AS descricao, vencimento,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento, quitado
+        FROM next_lancamento
+        WHERE tipo = ?
+          AND (
+            lower(trim(COALESCE(quitado, ''))) = 'sim'
+            OR data_pagamento IS NOT NULL
+          )
+        ORDER BY data_pagamento DESC NULLS LAST, id DESC
+        """,
+        (tipo,),
+    )
+    mostrar_lembrete_next()
+    abertas = query(
+        f"""
+        SELECT id, codigo, {descricao_sql} AS descricao,
+               COALESCE(NULLIF(TRIM(nome), ''), NULLIF(TRIM(historico), ''), 'Sem identificação') AS cliente,
+               vencimento,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               juros, multa, quitado
+        FROM next_lancamento
+        WHERE tipo = ?
+          AND lower(COALESCE(quitado, '')) <> 'sim'
+          {filtro}
+        ORDER BY CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END, vencimento, codigo
+        """,
+        tuple([tipo, *params_busca]),
+    )
+    vencimento = pd.to_datetime(abertas["vencimento"], errors="coerce") if not abertas.empty else pd.Series(dtype="datetime64[ns]")
+    vencidas_mask = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
+    vencidas = abertas.loc[vencidas_mask] if not abertas.empty else abertas
+    a_vencer = abertas.loc[~vencidas_mask] if not abertas.empty else abertas
+    if tipo == "receber":
+        if not vencidas.empty:
+            vencidas = vencidas.copy()
+            vencidas["juros"] = 0
+            vencidas["multa"] = 0
+        if not a_vencer.empty:
+            a_vencer = a_vencer.copy()
+            a_vencer["juros"] = 0
+            a_vencer["multa"] = 0
+    elif tipo == "pagar":
+        if not vencidas.empty:
+            vencidas = vencidas.copy()
+            vencidas["juros"] = 0
+        if not a_vencer.empty:
+            a_vencer = a_vencer.copy()
+            a_vencer["juros"] = 0
+
+    def total_lista(contas: pd.DataFrame) -> float:
+        if contas.empty:
+            return 0.0
+        return round(
+            sum(
+                valor_divida_exibida(
+                    registro.valor,
+                    registro.valor_pago,
+                    getattr(registro, "juros", 0),
+                    getattr(registro, "multa", 0),
+                )
+                for registro in contas.itertuples(index=False)
+            ),
+            2,
+        )
+
+    aviso = st.session_state.pop("next_baixa_aviso", None)
+    aviso_texto = st.session_state.pop("next_baixa_aviso_texto", None)
+    if aviso:
+        st.success(aviso_texto or f"{inteiro(aviso)} conta(s) atualizada(s).")
+    elif aviso == 0:
+        st.info("Nenhuma alteração para salvar.")
+    if tipo == "receber":
+        st.caption("Na busca, o valor do cliente fica separado em contas vencidas e contas a vencer.")
+        mostrar_totais_cliente(abertas)
+    coluna_vencidas, coluna_avencer = st.columns(2, gap="medium")
+    with coluna_vencidas:
+        st.html('<div id="next-vencidas" style="scroll-margin-top:80px"></div>')
+        titulo_central(nome_lista_next(tipo, True))
+        v1, v2 = st.columns(2)
+        v1.metric("Quantidade", inteiro(len(vencidas)))
+        v2.metric("Valor", brl(total_lista(vencidas)))
+        if vencidas.empty:
+            st.info("Nenhuma conta vencida.")
+        else:
+            st.caption("Estas contas já passaram do vencimento e ainda não foram quitadas. Baixar abre juros e multa.")
+            listar_next_abertas(
+                vencidas,
+                chave_ids="nx_ids_vencidas",
+                chave_click="nx_click_baixar_vencidas",
+                ao_clicar=click_baixar_vencidas,
+                alt="Contas vencidas do Next",
+                vermelho=True,
+            )
+    with coluna_avencer:
+        st.html('<div id="next-avencer" style="scroll-margin-top:80px"></div>')
+        titulo_central(nome_lista_next(tipo, False))
+        a1, a2 = st.columns(2)
+        a1.metric("Quantidade", inteiro(len(a_vencer)))
+        a2.metric("Valor", brl(total_lista(a_vencer)))
+        if a_vencer.empty:
+            st.info("Nenhuma conta em aberto por vencer.")
+        else:
+            st.caption("No dia seguinte ao vencimento, se não forem quitadas, passam para a lista vermelha.")
+            listar_next_abertas(
+                a_vencer,
+                chave_ids="nx_ids_avencer",
+                chave_click="nx_click_baixar_avencer",
+                ao_clicar=click_baixar_avencer,
+                alt="Contas a vencer do Next",
+            )
+    st.html('<div id="next-recentes" style="scroll-margin-top:80px"></div>')
+    st.subheader("Documentos baixados")
+    st.caption(
+        "Documentos já baixados neste menu, da baixa mais nova para a mais antiga. "
+        "O valor pago é o da baixa. Ver documento abre a ficha. Reabrir baixa ajusta juros, multa e pagamento."
+    )
+    if recentes.empty:
+        st.info("Nenhum documento baixado neste menu.")
+    else:
+        r1, r2 = st.columns(2)
+        r1.metric("Documentos baixados", inteiro(len(recentes)))
+        r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
+        listar_next_recentes(recentes)
+    st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
+    st.subheader("Todas as contas")
+    st.caption(
+        f"Contas recebidas nos últimos {DIAS_EDICAO_BAIXA} dias ficam no topo das recebidas, "
+        "da baixa mais nova para a mais antiga. Depois desse prazo elas seguem a ordem de vencimento."
+    )
+    quadro_quitado = query(
+        """
+        SELECT DISTINCT quitado
+        FROM next_lancamento
+        WHERE quitado IS NOT NULL AND TRIM(quitado) <> ''
+        ORDER BY 1
+        """
+    )
+    quitados = [str(valor) for valor in quadro_quitado.iloc[:, 0].tolist()] if not quadro_quitado.empty else ["Nao", "Sim"]
+    f1, f2, f3 = st.columns([2, 1, 1])
+    texto = f1.text_input(
+        "Pesquisar",
+        placeholder="Código, nome, histórico, duplicata ou observação",
+        key="busca_next_fin",
+        persist_state="session",
+    )
+    quitado = f2.multiselect(
+        "Quitado",
+        quitados,
+        key="quitado_next_fin",
+        persist_state="session",
+    )
+    limite = f3.slider(
+        "Máximo de linhas",
+        50,
+        5000,
+        500,
+        50,
+        key="limite_next_fin",
+        persist_state="session",
+    )
+    d1, d2 = st.columns(2)
+    inicio = d1.date_input(
+        "Vencimento de",
+        value=None,
+        key="next_de_fin",
+        format="DD/MM/YYYY",
+        persist_state="session",
+    )
+    fim = d2.date_input(
+        "Vencimento até",
+        value=None,
+        key="next_ate_fin",
+        format="DD/MM/YYYY",
+        persist_state="session",
+    )
+    params: list = [tipo]
+    where = " WHERE tipo = ?"
+    where += clausula_pesquisa_next(termo, params)
+    where += text_clause(["codigo", "nome", "historico", "duplicata", "obs_conta"], texto, params)
+    where += in_clause("quitado", quitado, params)
+    where += date_clause("vencimento", inicio, fim, params)
+    totais = query(
+        f"""
+        SELECT COUNT(*) AS n, SUM(valor_liquido) AS valor, SUM(valor_pago) AS pago,
+               SUM(valor_liquido - COALESCE(valor_pago, 0)) AS aberto
+        FROM next_lancamento{where}
+        """,
+        tuple(params),
+    )
+    recebida = (
+        "lower(COALESCE(quitado, '')) = 'sim' "
+        "AND substr(COALESCE(CAST(data_pagamento AS TEXT), ''), 1, 10) >= ?"
+    )
+    frame = query(
+        f"""
+        SELECT codigo, {descricao_sql} AS descricao, duplicata, vencimento, quitado,
+               valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento
+        FROM next_lancamento{where}
+        ORDER BY CASE WHEN lower(COALESCE(quitado, '')) <> 'sim' THEN 0 ELSE 1 END,
+                 CASE WHEN {recebida} THEN 0 ELSE 1 END,
+                 CASE WHEN {recebida} THEN data_pagamento END DESC,
+                 CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END,
+                 vencimento, codigo
+        LIMIT ?
+        """,
+        tuple([*params, limite_recente, limite_recente, int(limite)]),
+    )
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Linhas no filtro", inteiro(totais.iat[0, 0] or 0))
+    m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
+    m3.metric("Valor baixado", brl(totais.iat[0, 2]))
+    tabela_next(frame, "fin")
+
+
 def painel_contas_next() -> None:
     st.subheader("Lançamentos a pagar/receber")
     for chave in (
@@ -5388,7 +5626,8 @@ def painel_contas_next() -> None:
         where, params = _where_lancamento(tipo)
         frame = query(
             f"""
-            SELECT codigo, duplicata, vencimento, nome, historico, data_pagamento, valor_baixa, id
+            SELECT codigo, duplicata, vencimento, nome, historico, data_pagamento,
+                   valor_baixa, COALESCE(valor_pago, 0) AS valor_pago, quitado, id
             FROM next_lancamento
             {where}
             ORDER BY CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END, vencimento, codigo
@@ -5396,6 +5635,11 @@ def painel_contas_next() -> None:
             tuple(params),
         )
         st.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
+        pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
+        baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
+        quitado_flag = frame["quitado"].map(lambda valor: str(valor or "").strip().casefold() == "sim")
+        st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
+        st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
         visivel = pd.DataFrame(
             {
                 "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -5405,15 +5649,29 @@ def painel_contas_next() -> None:
                 "Data Emissão": "",
                 "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
                 "Data pagto.": frame["data_pagamento"].map(data_br),
-                "Valor da Baixa": frame["valor_baixa"],
+                "Valor da Baixa": pago.where(pago > 0, baixa_planilha),
+                "Documento": ["Ver documento" if flag else "Baixar" for flag in quitado_flag],
             }
+        )
+        st.caption(
+            "Valor da Baixa é o valor pago neste painel. "
+            "Baixar abre juros, multa e o pagamento. Ver documento abre a ficha do que já foi baixado."
         )
         st.dataframe(
             visivel,
             width="stretch",
             hide_index=True,
             height=420,
-            column_config={"Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f")},
+            column_config={
+                "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f"),
+                "Documento": st.column_config.ButtonColumn(
+                    "Documento",
+                    type="primary",
+                    width="small",
+                    on_click=click_lancamento_grade,
+                    key="nx_click_lancamento",
+                ),
+            },
             alt="Lançamentos a pagar e receber",
         )
         i1, i2, i3 = st.columns([1, 1, 2])
@@ -5445,9 +5703,12 @@ def painel_contas_next() -> None:
             if achado.empty:
                 st.info("Não há lançamento com esse código neste tipo de conta.")
             else:
-                abrir_baixa_next(int(achado.iat[0, 0]), False, True)
+                conta = buscar_next(int(achado.iat[0, 0]))
+                quitado = conta is not None and str(conta["quitado"] or "").strip().casefold() == "sim"
+                abrir_baixa_next(int(achado.iat[0, 0]), False, quitado)
     else:
         st.dataframe(pd.DataFrame(columns=colunas), width="stretch", hide_index=True, height=180, alt="Lançamentos")
+    _painel_operacao_contas(tipo)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
 
