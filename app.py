@@ -2258,6 +2258,7 @@ def dialogo_baixa() -> None:
         st.subheader("Reabrir baixa")
     dias = dias_em_atraso(linha["vencimento"], "Nao")
     _ficha_conta(linha, dias)
+    liberado = indagar_edicao("baixa_oficina", str(conta_id), "esta baixa")
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
     base_legal = valor_banco(linha["valor"]) if reabrir else saldo
     juros_lei, multa_lei = encargos_legais(base_legal, dias)
@@ -2268,14 +2269,15 @@ def dialogo_baixa() -> None:
         f"Sugestão para {dias or 0} dia(s): juros {brl(juros_lei)} e multa {brl(multa_lei)}."
     )
     j1, j2, j3 = st.columns([1, 1, 1], vertical_alignment="bottom")
-    j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"bx_juros_{conta_id}")
-    j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"bx_multa_{conta_id}")
+    j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"bx_juros_{conta_id}", disabled=not liberado)
+    j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"bx_multa_{conta_id}", disabled=not liberado)
     j3.button(
         "Recalcular pela lei",
         key=f"bx_recalc_{conta_id}",
         on_click=_recalcular_encargos,
         args=(int(conta_id), base_legal, dias),
         width="stretch",
+        disabled=not liberado,
     )
     rotulo_pago = "Valor pago" if reabrir else "Valor pago nesta baixa"
     p1, p2 = st.columns(2)
@@ -2287,13 +2289,15 @@ def dialogo_baixa() -> None:
         key=f"bx_pago_{conta_id}",
         on_change=_sync_data_pagamento,
         args=(int(conta_id),),
+        disabled=not liberado,
     )
     p2.date_input(
         "Data do pagamento",
         format="DD/MM/YYYY",
         key=f"bx_data_{conta_id}",
+        disabled=not liberado,
     )
-    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=80)
+    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=80, disabled=not liberado)
     juros, multa, pago_total, devido = _totais_baixa(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     r1, r2, r3 = st.columns(3)
@@ -2305,9 +2309,9 @@ def dialogo_baixa() -> None:
         valor_banco(st.session_state.get(f"bx_pago_{conta_id}")) > 0 or reabrir
     )
     b1, b2 = st.columns(2)
-    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"bx_salvar_{conta_id}", disabled=not pode_quitar):
+    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"bx_salvar_{conta_id}", disabled=not (liberado and pode_quitar)):
         _salvar_form_baixa(linha, int(conta_id), reabrir, True)
-    if b2.button("Salvar baixa parcial", width="stretch", key=f"bx_parcial_{conta_id}", disabled=not pode_parcial):
+    if b2.button("Salvar baixa parcial", width="stretch", key=f"bx_parcial_{conta_id}", disabled=not (liberado and pode_parcial)):
         _salvar_form_baixa(linha, int(conta_id), reabrir, False)
     if not pode_quitar:
         st.caption("A baixa integral só fica disponível quando o valor pago é igual ou maior que o total para quitação.")
@@ -2406,6 +2410,7 @@ def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -
     versao_chave = f"baixa_versao_{origem}"
     rascunho_chave = f"rascunho_{origem}"
     st.session_state.setdefault(versao_chave, 0)
+    liberado = indagar_edicao("editor_baixa", origem, "estas contas")
     banco = preparar_editor(contas)
     rascunho = st.session_state.get(rascunho_chave)
     visivel = rascunho if mesmo_conjunto(rascunho, banco) else banco
@@ -2419,7 +2424,7 @@ def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -
         hide_index=True,
         height=560 if origem == "abertas" else 360,
         num_rows="fixed",
-        disabled=[coluna for coluna in ABERTAS_COLS if coluna not in CAMPOS_BAIXA],
+        disabled=list(ABERTAS_COLS) if not liberado else [coluna for coluna in ABERTAS_COLS if coluna not in CAMPOS_BAIXA],
         column_config=config_baixas(origem, chave),
         key=f"editor_{origem}_{st.session_state[versao_chave]}",
         alt="Contas com baixa editável",
@@ -2435,7 +2440,7 @@ def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -
                 f"que o valor da conta. Ajuste nas OS {lista}."
             )
         st.rerun()
-    if st.button("Salvar baixas", type="primary", key=f"salvar_{origem}"):
+    if liberado and st.button("Salvar baixas", type="primary", key=f"salvar_{origem}"):
         st.session_state.baixa_aviso = gravar_baixas(ajustado, banco)
         st.session_state[rascunho_chave] = None
         st.session_state[versao_chave] += 1
@@ -5152,6 +5157,7 @@ def dialogo_baixa_next() -> None:
     if reabrir:
         st.subheader("Reabrir baixa")
     _ficha_next(linha, dias, mostrar_baixa=reabrir)
+    liberado = indagar_edicao("baixa_next", str(conta_id), "esta baixa")
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
     base_legal = valor_banco(linha["valor"]) if reabrir else saldo
     pagar = _conta_a_pagar(linha)
@@ -5162,13 +5168,14 @@ def dialogo_baixa_next() -> None:
             f"Sugestão para {dias or 0} dia(s): multa {brl(multa_lei)}."
         )
         j1, j2 = st.columns([1, 1], vertical_alignment="bottom")
-        j1.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
+        j1.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}", disabled=not liberado)
         j2.button(
             "Recalcular pela lei",
             key=f"nx_recalc_{conta_id}",
             on_click=_recalcular_next,
             args=(int(conta_id), base_legal, dias, False),
             width="stretch",
+            disabled=not liberado,
         )
     else:
         st.button(
@@ -5178,14 +5185,15 @@ def dialogo_baixa_next() -> None:
             key=f"nx_recalc_{conta_id}",
             on_click=_recalcular_next,
             args=(int(conta_id), base_legal, dias, True),
+            disabled=not liberado,
         )
         st.caption(
             "O botão preenche a multa de 2% e os juros de 1% ao mês, proporcionais aos dias. "
             "Os campos podem ser alterados antes de salvar."
         )
         j1, j2 = st.columns(2)
-        j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"nx_juros_{conta_id}")
-        j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}")
+        j1.number_input("Juros", min_value=0.0, step=0.01, format="%.2f", key=f"nx_juros_{conta_id}", disabled=not liberado)
+        j2.number_input("Multa", min_value=0.0, step=0.01, format="%.2f", key=f"nx_multa_{conta_id}", disabled=not liberado)
     rotulo_pago = "Valor pago" if reabrir else "Valor pago nesta baixa"
     p1, p2 = st.columns(2)
     p1.number_input(
@@ -5196,9 +5204,10 @@ def dialogo_baixa_next() -> None:
         key=f"nx_pago_{conta_id}",
         on_change=_sync_data_next,
         args=(int(conta_id),),
+        disabled=not liberado,
     )
-    p2.date_input("Data do pagamento", format="DD/MM/YYYY", key=f"nx_data_{conta_id}")
-    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=80)
+    p2.date_input("Data do pagamento", format="DD/MM/YYYY", key=f"nx_data_{conta_id}", disabled=not liberado)
+    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=80, disabled=not liberado)
     juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     if pagar:
@@ -5217,9 +5226,9 @@ def dialogo_baixa_next() -> None:
         valor_banco(st.session_state.get(f"nx_pago_{conta_id}")) > 0 or reabrir
     )
     b1, b2 = st.columns(2)
-    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"nx_salvar_{conta_id}", disabled=not pode_quitar):
+    if b1.button("Salvar baixa", type="primary", width="stretch", key=f"nx_salvar_{conta_id}", disabled=not (liberado and pode_quitar)):
         _salvar_baixa_next(linha, int(conta_id), reabrir, True)
-    if b2.button("Salvar baixa parcial", width="stretch", key=f"nx_parcial_{conta_id}", disabled=not pode_parcial):
+    if b2.button("Salvar baixa parcial", width="stretch", key=f"nx_parcial_{conta_id}", disabled=not (liberado and pode_parcial)):
         _salvar_baixa_next(linha, int(conta_id), reabrir, False)
     if not pode_quitar:
         st.caption("A baixa integral só fica disponível quando o valor pago é igual ou maior que o total para quitação.")
@@ -6418,8 +6427,294 @@ def _valor_campo(valor) -> str:
     return texto
 
 
-def _campo_pedido(rotulo: str, valor, chave: str) -> None:
-    st.text_input(rotulo, value=_valor_campo(valor), disabled=True, key=chave)
+def usuario_admin() -> bool:
+    usuario = st.session_state.get("usuario") or {}
+    return bool(usuario.get("administrador"))
+
+
+def _chave_widget(texto: str) -> str:
+    return "".join(caractere if caractere.isalnum() else "_" for caractere in str(texto))
+
+
+def garantir_painel_campo() -> None:
+    if st.session_state.get("painel_campo_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_campo (
+                    escopo text NOT NULL,
+                    registro text NOT NULL,
+                    campo text NOT NULL,
+                    valor text,
+                    atualizado_em timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY (escopo, registro, campo)
+                )
+                """
+            )
+        )
+    st.session_state.painel_campo_ok = True
+
+
+def campos_salvos(escopo: str, registro: str) -> dict[str, str]:
+    garantir_painel_campo()
+    frame = query(
+        "SELECT campo, valor FROM painel_campo WHERE escopo = ? AND registro = ?",
+        (escopo, str(registro)),
+    )
+    if frame.empty:
+        return {}
+    saida = {}
+    for campo, valor in zip(frame["campo"], frame["valor"], strict=True):
+        saida[str(campo)] = "" if valor is None or (isinstance(valor, float) and pd.isna(valor)) else str(valor)
+    return saida
+
+
+def gravar_campos(escopo: str, registro: str, valores: dict[str, str]) -> None:
+    garantir_painel_campo()
+    with engine().begin() as conn:
+        for campo, valor in valores.items():
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO painel_campo (escopo, registro, campo, valor, atualizado_em)
+                    VALUES (:escopo, :registro, :campo, :valor, now())
+                    ON CONFLICT (escopo, registro, campo)
+                    DO UPDATE SET valor = EXCLUDED.valor, atualizado_em = now()
+                    """
+                ),
+                {"escopo": escopo, "registro": str(registro), "campo": campo, "valor": valor},
+            )
+        registrar_log(
+            "Edição",
+            f"Alterou {escopo} {registro}: {len(valores)} campo(s).",
+            modulo="NeXT",
+            conn=conn,
+        )
+    st.cache_data.clear()
+
+
+def indagar_edicao(escopo: str, registro: str, titulo: str) -> bool:
+    marca = f"{escopo}:{registro}"
+    seguro = _chave_widget(marca)
+    if not usuario_admin():
+        st.caption("Somente o administrador pode editar os campos deste painel.")
+        return False
+    liberadas = dict(st.session_state.get("edicao_ok") or {})
+    if liberadas.get(marca):
+        if st.button("Concluir edição", key=f"fim_ed_{seguro}"):
+            liberadas.pop(marca, None)
+            st.session_state.edicao_ok = liberadas
+            st.rerun()
+        return True
+    st.info(
+        "A gravação fica neste painel e só começa depois desta confirmação.",
+        title=f"Editar {titulo}?",
+    )
+    sim, nao = st.columns(2)
+    if sim.button("Sim, editar", type="primary", key=f"sim_ed_{seguro}", width="stretch"):
+        liberadas[marca] = True
+        st.session_state.edicao_ok = liberadas
+        st.rerun()
+    nao.button("Não", key=f"nao_ed_{seguro}", width="stretch")
+    return False
+
+
+def _preparar_campos(escopo: str, registro: str, liberado: bool) -> None:
+    st.session_state.nx_overlay = campos_salvos(escopo, registro)
+    st.session_state.nx_editavel = liberado
+    st.session_state.nx_mapa_campos = {}
+
+
+def _valores_editados() -> dict[str, str]:
+    mapa = dict(st.session_state.get("nx_mapa_campos") or {})
+    valores = {}
+    for widget, campo in mapa.items():
+        bruto = st.session_state.get(widget)
+        if isinstance(bruto, str):
+            valores[campo] = texto_banco(bruto)
+    return valores
+
+
+def _campo_pedido(rotulo: str, valor, chave: str, travado: bool = False, campo: str | None = None) -> None:
+    nome = campo or chave
+    texto = _valor_campo(valor)
+    overlay = st.session_state.get("nx_overlay") or {}
+    if nome in overlay:
+        texto = overlay[nome]
+    mapa = dict(st.session_state.get("nx_mapa_campos") or {})
+    mapa[chave] = nome
+    st.session_state.nx_mapa_campos = mapa
+    editavel = (not travado) and bool(st.session_state.get("nx_editavel"))
+    if not editavel:
+        st.text_input(rotulo, value=texto, disabled=True, key=chave)
+        return
+    if chave not in st.session_state:
+        st.session_state[chave] = texto
+    st.text_input(rotulo, key=chave)
+
+
+def _data_informada(texto: str) -> date | None:
+    limpo = (texto or "").strip()
+    if not limpo:
+        return None
+    return data_iso(limpo)
+
+
+def aplicar_pedido(codigo: str, valores: dict[str, str]) -> None:
+    texto_data = (valores.get("emissao") or "").strip()
+    emissao = _data_informada(texto_data)
+    with engine().begin() as conn:
+        if texto_data and emissao is None:
+            conn.execute(
+                text(
+                    """
+                    UPDATE next_venda_item
+                    SET status = :status,
+                        cliente = :cliente,
+                        vendedor = :vendedor,
+                        condicao = :condicao
+                    WHERE codvenda = :codvenda
+                    """
+                ),
+                {
+                    "status": valores.get("status") or None,
+                    "cliente": valores.get("cliente") or None,
+                    "vendedor": valores.get("vendedor") or None,
+                    "condicao": valores.get("condicao") or None,
+                    "codvenda": codigo,
+                },
+            )
+            return
+        conn.execute(
+            text(
+                """
+                UPDATE next_venda_item
+                SET status = :status,
+                    cliente = :cliente,
+                    vendedor = :vendedor,
+                    condicao = :condicao,
+                    data = :data
+                WHERE codvenda = :codvenda
+                """
+            ),
+            {
+                "status": valores.get("status") or None,
+                "cliente": valores.get("cliente") or None,
+                "vendedor": valores.get("vendedor") or None,
+                "condicao": valores.get("condicao") or None,
+                "data": emissao,
+                "codvenda": codigo,
+            },
+        )
+
+
+def aplicar_os(codigo: str, valores: dict[str, str]) -> None:
+    texto_emissao = (valores.get("emissao") or "").strip()
+    texto_baixa = (valores.get("baixa") or "").strip()
+    emissao = _data_informada(texto_emissao)
+    baixa = _data_informada(texto_baixa)
+    campos = {
+        "status": valores.get("status") or None,
+        "tipo": valores.get("tipo") or None,
+        "cliente": valores.get("cliente") or None,
+        "funcionario": valores.get("funcionario") or None,
+        "veiculo": valores.get("veiculo") or None,
+        "chassi": valores.get("chassi") or None,
+        "codigo": codigo,
+    }
+    atribuicoes = [
+        "status = :status",
+        "tipo = :tipo",
+        "cliente = :cliente",
+        "funcionario = :funcionario",
+        "veiculo = :veiculo",
+        "chassi = :chassi",
+    ]
+    if not texto_emissao or emissao is not None:
+        atribuicoes.append("emissao = :emissao")
+        campos["emissao"] = emissao
+    if not texto_baixa or baixa is not None:
+        atribuicoes.append("baixa = :baixa")
+        campos["baixa"] = baixa
+    with engine().begin() as conn:
+        conn.execute(
+            text(f"UPDATE next_os SET {', '.join(atribuicoes)} WHERE codigo = :codigo"),
+            campos,
+        )
+
+
+def aplicar_cadastro(papel: str, codigo: str, nome_antigo: str, valores: dict[str, str]) -> None:
+    nome = valores.get("nome") or None
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE next_cadastro
+                SET nome = :nome,
+                    fantasia = :fantasia,
+                    documento = :documento,
+                    ie = :ie,
+                    telefone = :telefone,
+                    email = :email,
+                    endereco = :endereco,
+                    bairro = :bairro,
+                    cep = :cep,
+                    cidade = :cidade,
+                    uf = :uf,
+                    extra = :extra
+                WHERE papel = :papel AND codigo = :codigo
+                """
+            ),
+            {
+                "nome": nome,
+                "fantasia": valores.get("fantasia") or None,
+                "documento": valores.get("documento") or None,
+                "ie": valores.get("ie") or None,
+                "telefone": valores.get("telefone") or None,
+                "email": valores.get("email") or None,
+                "endereco": valores.get("endereco") or None,
+                "bairro": valores.get("bairro") or None,
+                "cep": valores.get("cep") or None,
+                "cidade": valores.get("cidade") or None,
+                "uf": valores.get("uf") or None,
+                "extra": valores.get("extra") or None,
+                "papel": papel,
+                "codigo": codigo,
+            },
+        )
+        if nome and nome_antigo and nome.casefold() != nome_antigo.casefold():
+            troca = {"novo": nome, "antigo": nome_antigo}
+            if papel == "fornecedor":
+                conn.execute(
+                    text(
+                        """
+                        UPDATE next_compra_item
+                        SET fornecedor = :novo
+                        WHERE upper(trim(fornecedor)) = upper(trim(:antigo))
+                        """
+                    ),
+                    troca,
+                )
+            else:
+                for tabela, coluna in (
+                    ("next_venda_item", "cliente"),
+                    ("next_os", "cliente"),
+                    ("next_orcamento", "cliente"),
+                    ("next_nf_saida", "cliente"),
+                    ("next_lancamento", "nome"),
+                ):
+                    conn.execute(
+                        text(
+                            f"""
+                            UPDATE {tabela}
+                            SET {coluna} = :novo
+                            WHERE upper(trim({coluna})) = upper(trim(:antigo))
+                            """
+                        ),
+                        troca,
+                    )
 
 
 def _codigo_cliente(nome: str) -> str:
@@ -6477,34 +6772,44 @@ def painel_do_cliente(nome: str, chave: str, papel: str = "cliente") -> None:
             st.info("Este nome não está no cadastro.")
             return
         linha = cad.iloc[0]
+        codigo_cad = texto_limpo(linha["codigo"])
+        liberado = indagar_edicao(f"cadastro_{papel}", codigo_cad, "este cadastro")
+        _preparar_campos(f"cadastro_{papel}", codigo_cad, liberado)
         c1, c2, c3 = st.columns([1, 3, 2])
         with c1:
-            _campo_pedido("Código", linha["codigo"], f"cli_{chave}_cod")
+            _campo_pedido("Código", linha["codigo"], f"cli_{chave}_cod", travado=True, campo="codigo")
         with c2:
-            _campo_pedido("Nome", linha["nome"], f"cli_{chave}_nome")
+            _campo_pedido("Nome", linha["nome"], f"cli_{chave}_nome", campo="nome")
         with c3:
-            _campo_pedido("Fantasia", linha["fantasia"], f"cli_{chave}_fant")
+            _campo_pedido("Fantasia", linha["fantasia"], f"cli_{chave}_fant", campo="fantasia")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            _campo_pedido("Documento", linha["documento"], f"cli_{chave}_doc")
+            _campo_pedido("Documento", linha["documento"], f"cli_{chave}_doc", campo="documento")
         with c2:
-            _campo_pedido("Inscrição estadual", linha["ie"], f"cli_{chave}_ie")
+            _campo_pedido("Inscrição estadual", linha["ie"], f"cli_{chave}_ie", campo="ie")
         with c3:
-            _campo_pedido("Telefone", linha["telefone"], f"cli_{chave}_tel")
+            _campo_pedido("Telefone", linha["telefone"], f"cli_{chave}_tel", campo="telefone")
         with c4:
-            _campo_pedido("E-mail", linha["email"], f"cli_{chave}_mail")
-        _campo_pedido("Endereço", linha["endereco"], f"cli_{chave}_end")
+            _campo_pedido("E-mail", linha["email"], f"cli_{chave}_mail", campo="email")
+        _campo_pedido("Endereço", linha["endereco"], f"cli_{chave}_end", campo="endereco")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            _campo_pedido("Bairro", linha["bairro"], f"cli_{chave}_bairro")
+            _campo_pedido("Bairro", linha["bairro"], f"cli_{chave}_bairro", campo="bairro")
         with c2:
-            _campo_pedido("CEP", linha["cep"], f"cli_{chave}_cep")
+            _campo_pedido("CEP", linha["cep"], f"cli_{chave}_cep", campo="cep")
         with c3:
-            _campo_pedido("Cidade", linha["cidade"], f"cli_{chave}_cid")
+            _campo_pedido("Cidade", linha["cidade"], f"cli_{chave}_cid", campo="cidade")
         with c4:
-            _campo_pedido("UF", linha["uf"], f"cli_{chave}_uf")
-        if texto_limpo(linha["extra"]):
-            _campo_pedido("Observação", linha["extra"], f"cli_{chave}_extra")
+            _campo_pedido("UF", linha["uf"], f"cli_{chave}_uf", campo="uf")
+        _campo_pedido("Observação", linha["extra"], f"cli_{chave}_extra", campo="extra")
+        if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_cad_{papel}_{_chave_widget(codigo_cad)}"):
+            valores = _valores_editados()
+            gravar_campos(f"cadastro_{papel}", codigo_cad, valores)
+            aplicar_cadastro(papel, codigo_cad, texto_limpo(linha["nome"]), valores)
+            st.session_state.nx_editavel = False
+            st.success("Cadastro gravado.")
+            st.rerun()
+        st.session_state.nx_editavel = False
     if papel != "cliente":
         compras = query(
             """
@@ -6692,51 +6997,61 @@ def ficha_pedido(codigo: str) -> None:
         nota_numero = texto_limpo(notas.iloc[0]["nota"])
         orcamento_numero = texto_limpo(notas.iloc[0]["orcamento"])
     chave = sem_acento(codigo).replace(" ", "_")
+    liberado = indagar_edicao("pedido", codigo, f"o pedido {codigo}")
+    _preparar_campos("pedido", codigo, liberado)
     with st.container(border=True):
         st.markdown("**Dados do pedido**")
         c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         with c1:
-            _campo_pedido("Pedido", codigo, f"ped_{chave}_num")
+            _campo_pedido("Pedido", codigo, f"ped_{chave}_num", travado=True, campo="numero")
         with c2:
-            _campo_pedido("Orçamento", orcamento_numero, f"ped_{chave}_orc")
+            _campo_pedido("Orçamento", orcamento_numero, f"ped_{chave}_orc", campo="orcamento")
         with c3:
-            _campo_pedido("O.S.", "", f"ped_{chave}_os")
+            _campo_pedido("O.S.", "", f"ped_{chave}_os", campo="os")
         with c4:
-            _campo_pedido("Data emissão", data_br(cab["data"]), f"ped_{chave}_emissao")
+            _campo_pedido("Data emissão", data_br(cab["data"]), f"ped_{chave}_emissao", campo="emissao")
         with c5:
-            _campo_pedido("Data entrega", "", f"ped_{chave}_entrega")
+            _campo_pedido("Data entrega", "", f"ped_{chave}_entrega", campo="entrega")
         with c6:
-            _campo_pedido("Hora", "", f"ped_{chave}_hora")
+            _campo_pedido("Hora", "", f"ped_{chave}_hora", campo="hora")
         with c7:
-            _campo_pedido("Status do pedido", cab["status"], f"ped_{chave}_status")
+            _campo_pedido("Status do pedido", cab["status"], f"ped_{chave}_status", campo="status")
         c1, c2, c3, c4 = st.columns([1, 3, 1.2, 2], vertical_alignment="bottom")
         with c1:
-            _campo_pedido("Código do cliente", codigo_cliente, f"ped_{chave}_codcli")
+            _campo_pedido("Código do cliente", codigo_cliente, f"ped_{chave}_codcli", campo="codcli")
         with c2:
-            _campo_pedido("Razão social/nome do cliente", cliente, f"ped_{chave}_nome")
+            _campo_pedido("Razão social/nome do cliente", cliente, f"ped_{chave}_nome", campo="cliente")
         with c3:
             botao_cliente(cliente, f"ped_{chave}")
         with c4:
-            _campo_pedido("Tabela de preços", "", f"ped_{chave}_tabela")
+            _campo_pedido("Tabela de preços", "", f"ped_{chave}_tabela", campo="tabela")
         c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
         with c1:
-            _campo_pedido("Contato", "", f"ped_{chave}_contato")
+            _campo_pedido("Contato", "", f"ped_{chave}_contato", campo="contato")
         with c2:
-            _campo_pedido("Vendedor", cab["vendedor"], f"ped_{chave}_vend")
+            _campo_pedido("Vendedor", cab["vendedor"], f"ped_{chave}_vend", campo="vendedor")
         with c3:
-            _campo_pedido("Condições de pagamento", cab["condicao"], f"ped_{chave}_pagto")
+            _campo_pedido("Condições de pagamento", cab["condicao"], f"ped_{chave}_pagto", campo="condicao")
         with c4:
-            _campo_pedido("Nota fiscal", nota_numero, f"ped_{chave}_nf")
+            _campo_pedido("Nota fiscal", nota_numero, f"ped_{chave}_nf", campo="nota")
         c1, c2, c3, c4 = st.columns([2, 1, 3, 1])
         with c1:
-            _campo_pedido("Condições de entrega", "", f"ped_{chave}_ent")
+            _campo_pedido("Condições de entrega", "", f"ped_{chave}_ent", campo="cond_entrega")
         with c2:
-            _campo_pedido("Cód. transportador", "", f"ped_{chave}_codtr")
+            _campo_pedido("Cód. transportador", "", f"ped_{chave}_codtr", campo="cod_transp")
         with c3:
-            _campo_pedido("Nome/razão social do transportador", "", f"ped_{chave}_transp")
+            _campo_pedido("Nome/razão social do transportador", "", f"ped_{chave}_transp", campo="transportador")
         with c4:
-            _campo_pedido("Valor do frete", "", f"ped_{chave}_frete")
-        _campo_pedido("Observações do pedido", "", f"ped_{chave}_obs")
+            _campo_pedido("Valor do frete", "", f"ped_{chave}_frete", campo="frete")
+        _campo_pedido("Observações do pedido", "", f"ped_{chave}_obs", campo="obs")
+        if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_ped_{chave}"):
+            valores = _valores_editados()
+            gravar_campos("pedido", codigo, valores)
+            aplicar_pedido(codigo, valores)
+            st.session_state.nx_editavel = False
+            st.success("Pedido gravado.")
+            st.rerun()
+    st.session_state.nx_editavel = False
     painel_do_cliente(cliente, f"ped_{chave}")
     linhas = []
     custo = 0.0
@@ -6852,32 +7167,42 @@ def ficha_os(codigo: str) -> None:
     cliente = texto_limpo(linha["cliente"])
     codigo_cliente = _codigo_cliente(cliente)
     chave = sem_acento(codigo).replace(" ", "_")
+    liberado = indagar_edicao("os", codigo, f"a ordem {codigo}")
+    _preparar_campos("os", codigo, liberado)
     with st.container(border=True):
         st.markdown("**Dados da ordem**")
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            _campo_pedido("Número", linha["codigo"], f"os_{chave}_num")
+            _campo_pedido("Número", linha["codigo"], f"os_{chave}_num", travado=True, campo="numero")
         with c2:
-            _campo_pedido("Data de emissão", data_br(linha["emissao"]), f"os_{chave}_emissao")
+            _campo_pedido("Data de emissão", data_br(linha["emissao"]), f"os_{chave}_emissao", campo="emissao")
         with c3:
-            _campo_pedido("Data da baixa", data_br(linha["baixa"]), f"os_{chave}_baixa")
+            _campo_pedido("Data da baixa", data_br(linha["baixa"]), f"os_{chave}_baixa", campo="baixa")
         with c4:
-            _campo_pedido("Status", linha["status"], f"os_{chave}_status")
+            _campo_pedido("Status", linha["status"], f"os_{chave}_status", campo="status")
         with c5:
-            _campo_pedido("Tipo", linha["tipo"], f"os_{chave}_tipo")
+            _campo_pedido("Tipo", linha["tipo"], f"os_{chave}_tipo", campo="tipo")
         c1, c2, c3 = st.columns([1, 3, 1.2], vertical_alignment="bottom")
         with c1:
-            _campo_pedido("Código do cliente", codigo_cliente, f"os_{chave}_codcli")
+            _campo_pedido("Código do cliente", codigo_cliente, f"os_{chave}_codcli", campo="codcli")
         with c2:
-            _campo_pedido("Cliente", cliente, f"os_{chave}_nome")
+            _campo_pedido("Cliente", cliente, f"os_{chave}_nome", campo="cliente")
         with c3:
             botao_cliente(cliente, f"os_{chave}")
-        _campo_pedido("Funcionário", linha["funcionario"], f"os_{chave}_func")
+        _campo_pedido("Funcionário", linha["funcionario"], f"os_{chave}_func", campo="funcionario")
         c1, c2 = st.columns(2)
         with c1:
-            _campo_pedido("Veículo", linha["veiculo"], f"os_{chave}_veic")
+            _campo_pedido("Veículo", linha["veiculo"], f"os_{chave}_veic", campo="veiculo")
         with c2:
-            _campo_pedido("Chassi", linha["chassi"], f"os_{chave}_chassi")
+            _campo_pedido("Chassi", linha["chassi"], f"os_{chave}_chassi", campo="chassi")
+        if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_os_{chave}"):
+            valores = _valores_editados()
+            gravar_campos("os", codigo, valores)
+            aplicar_os(codigo, valores)
+            st.session_state.nx_editavel = False
+            st.success("Ordem de serviço gravada.")
+            st.rerun()
+    st.session_state.nx_editavel = False
     painel_do_cliente(cliente, f"os_{chave}")
     produtos, servicos = st.tabs(["Dados dos produtos", "Dados de serviços"])
     with produtos:
@@ -7523,20 +7848,78 @@ def tela_produtos(reposicao: bool = False) -> None:
         """,
         tuple(params),
     )
-    frame = frame.rename(
-        columns={
-            "codigo": "Código",
-            "descricao": "Descrição",
-            "marca": "Marca",
-            "grupo": "Grupo",
-            "unidade": "Unidade",
-            "local_estoque": "Local",
-            "estoque": "Estoque",
-            "estoque_minimo": "Mínimo",
-            "preco_venda": "Preço",
-        }
+    liberado = indagar_edicao("produtos", "cadastro", "os produtos")
+    if not liberado:
+        visivel = frame.rename(
+            columns={
+                "codigo": "Código",
+                "descricao": "Descrição",
+                "marca": "Marca",
+                "grupo": "Grupo",
+                "unidade": "Unidade",
+                "local_estoque": "Local",
+                "estoque": "Estoque",
+                "estoque_minimo": "Mínimo",
+                "preco_venda": "Preço",
+            }
+        )
+        grade_next(visivel, "Produtos", {"Preço"})
+        return
+    editado = st.data_editor(
+        frame,
+        width="stretch",
+        hide_index=True,
+        height=560,
+        num_rows="fixed",
+        disabled=["codigo"],
+        column_config={
+            "codigo": st.column_config.TextColumn("Código"),
+            "descricao": st.column_config.TextColumn("Descrição"),
+            "marca": st.column_config.TextColumn("Marca"),
+            "grupo": st.column_config.TextColumn("Grupo"),
+            "unidade": st.column_config.TextColumn("Unidade"),
+            "local_estoque": st.column_config.TextColumn("Local"),
+            "estoque": st.column_config.NumberColumn("Estoque", format="%.3f"),
+            "estoque_minimo": st.column_config.NumberColumn("Mínimo", format="%.3f"),
+            "preco_venda": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
+        },
+        key="editor_produtos",
+        alt="Produtos",
     )
-    grade_next(frame, "Produtos", {"Preço"})
+    if st.button("Gravar alterações", type="primary", key="gravar_produtos"):
+        with engine().begin() as conn:
+            for item in editado.itertuples(index=False):
+                conn.execute(
+                    text(
+                        """
+                        UPDATE next_produto
+                        SET descricao = :descricao,
+                            marca = :marca,
+                            grupo = :grupo,
+                            unidade = :unidade,
+                            local_estoque = :local,
+                            estoque = :estoque,
+                            estoque_minimo = :minimo,
+                            preco_venda = :preco
+                        WHERE codigo = :codigo
+                        """
+                    ),
+                    {
+                        "descricao": texto_banco(item.descricao) or None,
+                        "marca": texto_banco(item.marca) or None,
+                        "grupo": texto_banco(item.grupo) or None,
+                        "unidade": texto_banco(item.unidade) or None,
+                        "local": texto_banco(item.local_estoque) or None,
+                        "estoque": None if pd.isna(item.estoque) else float(item.estoque),
+                        "minimo": None if pd.isna(item.estoque_minimo) else float(item.estoque_minimo),
+                        "preco": None if pd.isna(item.preco_venda) else float(item.preco_venda),
+                        "codigo": texto_banco(item.codigo),
+                    },
+                )
+            registrar_log("Edição", f"Alterou {len(editado)} produto(s).", modulo="NeXT", conn=conn)
+        st.cache_data.clear()
+        st.success("Produtos gravados.")
+        st.rerun()
 
 
 def tela_servicos() -> None:
@@ -7549,10 +7932,54 @@ def tela_servicos() -> None:
         """
     )
     termo = st.text_input("Pesquisar serviço", placeholder="Descrição ou código", key="busca_servico_next")
-    frame = _filtrar_grade(frame, termo).rename(
-        columns={"codigo": "Código", "descricao": "Descrição", "unidade": "Unidade", "valor": "Valor"}
+    frame = _filtrar_grade(frame, termo)
+    liberado = indagar_edicao("servicos", "cadastro", "os serviços")
+    if not liberado:
+        visivel = frame.rename(
+            columns={"codigo": "Código", "descricao": "Descrição", "unidade": "Unidade", "valor": "Valor"}
+        )
+        grade_next(visivel, "Serviços", {"Valor"})
+        return
+    editado = st.data_editor(
+        frame,
+        width="stretch",
+        hide_index=True,
+        height=560,
+        num_rows="fixed",
+        disabled=["codigo"],
+        column_config={
+            "codigo": st.column_config.TextColumn("Código"),
+            "descricao": st.column_config.TextColumn("Descrição"),
+            "unidade": st.column_config.TextColumn("Unidade"),
+            "valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+        },
+        key="editor_servicos",
+        alt="Serviços",
     )
-    grade_next(frame, "Serviços", {"Valor"})
+    if st.button("Gravar alterações", type="primary", key="gravar_servicos"):
+        with engine().begin() as conn:
+            for item in editado.itertuples(index=False):
+                conn.execute(
+                    text(
+                        """
+                        UPDATE next_servico
+                        SET descricao = :descricao,
+                            unidade = :unidade,
+                            valor = :valor
+                        WHERE codigo = :codigo
+                        """
+                    ),
+                    {
+                        "descricao": texto_banco(item.descricao) or None,
+                        "unidade": texto_banco(item.unidade) or None,
+                        "valor": None if pd.isna(item.valor) else float(item.valor),
+                        "codigo": texto_banco(item.codigo),
+                    },
+                )
+            registrar_log("Edição", f"Alterou {len(editado)} serviço(s).", modulo="NeXT", conn=conn)
+        st.cache_data.clear()
+        st.success("Serviços gravados.")
+        st.rerun()
 
 
 def tela_os_abertas() -> None:
