@@ -4894,6 +4894,39 @@ def garantir_pedido_detalhe() -> None:
     st.session_state.pedido_detalhe_ok = True
 
 
+def garantir_os_detalhe() -> None:
+    if st.session_state.get("os_detalhe_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS next_os_item (
+                    id bigserial PRIMARY KEY,
+                    codos text NOT NULL,
+                    codproduto text NOT NULL,
+                    quantidade double precision,
+                    preco double precision,
+                    tipo_desconto text,
+                    desconto double precision
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS next_os_item_os ON next_os_item (codos)"))
+        for coluna, tipo in (
+            ("codcli", "text"),
+            ("hora_emissao", "text"),
+            ("hora_baixa", "text"),
+            ("problema", "text"),
+            ("entrada", "text"),
+            ("aprovacao", "date"),
+            ("observacoes", "text"),
+        ):
+            conn.execute(text(f"ALTER TABLE next_os ADD COLUMN IF NOT EXISTS {coluna} {tipo}"))
+    st.session_state.os_detalhe_ok = True
+
+
 def _texto_detalhe(valor) -> str:
     if valor is None:
         return ""
@@ -7486,6 +7519,12 @@ def aplicar_os(codigo: str, valores: dict[str, str]) -> None:
         "funcionario": valores.get("funcionario") or None,
         "veiculo": valores.get("veiculo") or None,
         "chassi": valores.get("chassi") or None,
+        "codcli": valores.get("codcli") or None,
+        "hora_emissao": valores.get("hora_emissao") or None,
+        "hora_baixa": valores.get("hora_baixa") or None,
+        "problema": valores.get("problema") or None,
+        "entrada": valores.get("entrada") or None,
+        "observacoes": valores.get("observacoes") or None,
         "codigo": codigo,
     }
     atribuicoes = [
@@ -7495,6 +7534,12 @@ def aplicar_os(codigo: str, valores: dict[str, str]) -> None:
         "funcionario = :funcionario",
         "veiculo = :veiculo",
         "chassi = :chassi",
+        "codcli = :codcli",
+        "hora_emissao = :hora_emissao",
+        "hora_baixa = :hora_baixa",
+        "problema = :problema",
+        "entrada = :entrada",
+        "observacoes = :observacoes",
     ]
     if not texto_emissao or emissao is not None:
         atribuicoes.append("emissao = :emissao")
@@ -7502,6 +7547,11 @@ def aplicar_os(codigo: str, valores: dict[str, str]) -> None:
     if not texto_baixa or baixa is not None:
         atribuicoes.append("baixa = :baixa")
         campos["baixa"] = baixa
+    texto_aprovacao = (valores.get("aprovacao") or "").strip()
+    aprovacao = _data_informada(texto_aprovacao)
+    if not texto_aprovacao or aprovacao is not None:
+        atribuicoes.append("aprovacao = :aprovacao")
+        campos["aprovacao"] = aprovacao
     with engine().begin() as conn:
         conn.execute(
             text(f"UPDATE next_os SET {', '.join(atribuicoes)} WHERE codigo = :codigo"),
@@ -8042,11 +8092,89 @@ def ficha_pedido(codigo: str) -> None:
     mostrar_historico_alteracao("pedido", codigo)
 
 
+def _texto_desconto_os(tipo, valor) -> tuple[str, str]:
+    numero = 0.0 if valor is None or pd.isna(valor) else float(valor)
+    if abs(numero) < 0.005:
+        return "", ""
+    if str(tipo or "") == "2":
+        return "Percentual", f"{numero:.2f}".replace(".", ",") + "%"
+    return "Valor", brl(numero)
+
+
+def _descricao_peca_os(cadastro: str, fabricante: str, pedidos: list[tuple[str, str]]) -> str:
+    alvo = sem_acento(cadastro).casefold()
+    fab = sem_acento(fabricante).casefold()
+    for produto, codigo_fab in pedidos:
+        if alvo and sem_acento(produto).casefold() == alvo:
+            return texto_limpo(produto)
+        if fab and sem_acento(codigo_fab).casefold() == fab:
+            return texto_limpo(produto)
+    return texto_limpo(cadastro)
+
+
+def _grade_produtos_os(codigo: str) -> pd.DataFrame:
+    pecas = query(
+        """
+        SELECT i.codproduto, i.quantidade, i.preco, i.tipo_desconto, i.desconto,
+               p.descricao, p.unidade, p.marca, p.grupo, p.cod_original, p.cod_fabricante,
+               p.local_estoque, p.estoque
+        FROM next_os_item i
+        LEFT JOIN next_produto p ON p.codigo = i.codproduto
+        WHERE i.codos = ?
+        ORDER BY i.id
+        """,
+        (codigo,),
+    )
+    pedidos = query(
+        """
+        SELECT v.produto, v.cod_fabricante
+        FROM next_venda_item v
+        JOIN next_pedido_detalhe d ON ltrim(COALESCE(v.codvenda, ''), '0') = d.codvenda
+        WHERE d.codos = ?
+        """,
+        (codigo,),
+    )
+    pares = [
+        (texto_limpo(item.produto), texto_limpo(item.cod_fabricante))
+        for item in pedidos.itertuples(index=False)
+    ]
+    linhas = []
+    for item in pecas.itertuples(index=False):
+        qtd = 0.0 if item.quantidade is None or pd.isna(item.quantidade) else float(item.quantidade)
+        preco = 0.0 if item.preco is None or pd.isna(item.preco) else float(item.preco)
+        tipo, desconto = _texto_desconto_os(item.tipo_desconto, item.desconto)
+        linhas.append(
+            {
+                "Código": texto_limpo(item.codproduto),
+                "Descrição do produto": _descricao_peca_os(
+                    texto_limpo(item.descricao),
+                    texto_limpo(item.cod_fabricante),
+                    pares,
+                ),
+                "UN": texto_limpo(item.unidade),
+                "Qtde.": qtd,
+                "Preço unitário": preco,
+                "Tp. desc.": tipo,
+                "Desc.": desconto,
+                "Valor": round(qtd * preco, 2),
+                "Marca": texto_limpo(item.marca),
+                "Grupo": texto_limpo(item.grupo),
+                "Local": texto_limpo(item.local_estoque),
+                "Qtde. atual": None if item.estoque is None or pd.isna(item.estoque) else float(item.estoque),
+                "Cód. original": texto_limpo(item.cod_original),
+                "Cód. fabricante": texto_limpo(item.cod_fabricante),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
 def ficha_os(codigo: str) -> None:
+    garantir_os_detalhe()
     cab = query(
         """
         SELECT codigo, emissao, cliente, tipo, funcionario, veiculo, chassi, status, baixa,
-               total_produtos, total_servicos, total
+               total_produtos, total_servicos, total, codcli, hora_emissao, hora_baixa,
+               problema, entrada, aprovacao, observacoes
         FROM next_os
         WHERE codigo = ?
         """,
@@ -8059,7 +8187,8 @@ def ficha_os(codigo: str) -> None:
         return
     linha = cab.iloc[0]
     cliente = texto_limpo(linha["cliente"])
-    codigo_cliente = _codigo_cliente(cliente)
+    codigo_cliente = _texto_detalhe(linha["codcli"]) or _codigo_cliente(cliente)
+    grade_produtos = _grade_produtos_os(codigo)
     chave = sem_acento(codigo).replace(" ", "_")
     liberado = indagar_edicao("os", codigo, f"a ordem {codigo}")
     _preparar_campos("os", codigo, liberado)
@@ -8089,6 +8218,16 @@ def ficha_os(codigo: str) -> None:
             _campo_pedido("Veículo", linha["veiculo"], f"os_{chave}_veic", campo="veiculo")
         with c2:
             _campo_pedido("Chassi", linha["chassi"], f"os_{chave}_chassi", campo="chassi")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _campo_pedido("Hora de emissão", linha["hora_emissao"], f"os_{chave}_hora", campo="hora_emissao")
+        with c2:
+            _campo_pedido("Hora da baixa", linha["hora_baixa"], f"os_{chave}_hrbaixa", campo="hora_baixa")
+        with c3:
+            _campo_pedido("Data de aprovação", data_br(linha["aprovacao"]), f"os_{chave}_aprov", campo="aprovacao")
+        _campo_pedido("Problema", linha["problema"], f"os_{chave}_prob", campo="problema")
+        _campo_pedido("Entrada", linha["entrada"], f"os_{chave}_entrada", campo="entrada")
+        _campo_pedido("Observações", linha["observacoes"], f"os_{chave}_obs", campo="observacoes")
         if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_os_{chave}"):
             valores = _valores_editados()
             gravar_campos("os", codigo, valores)
@@ -8101,10 +8240,37 @@ def ficha_os(codigo: str) -> None:
     produtos, servicos = st.tabs(["Dados dos produtos", "Dados de serviços"])
     with produtos:
         st.metric("Total de produtos", brl(linha["total_produtos"]))
-        st.info(
-            "O relatório de ordens de serviço trouxe o total de produtos, sem a lista peça a peça.",
-            title="Peças",
-        )
+        if grade_produtos.empty:
+            st.info("Esta ordem não tem peças na planilha de produtos.", title="Peças")
+        else:
+            st.dataframe(
+                grade_produtos,
+                width="stretch",
+                hide_index=True,
+                height=min(420, max(180, 48 + len(grade_produtos) * 36)),
+                column_config={
+                    "Código": st.column_config.TextColumn("Código", width="small"),
+                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width="large"),
+                    "UN": st.column_config.TextColumn("UN", width="small"),
+                    "Qtde.": st.column_config.NumberColumn("Qtde.", format="%.3f", width="small"),
+                    "Preço unitário": st.column_config.NumberColumn("Preço unitário", format="R$ %.2f"),
+                    "Tp. desc.": st.column_config.TextColumn("Tp. desc.", width="small"),
+                    "Desc.": st.column_config.TextColumn("Desc.", width="small"),
+                    "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                    "Marca": st.column_config.TextColumn("Marca"),
+                    "Grupo": st.column_config.TextColumn("Grupo"),
+                    "Local": st.column_config.TextColumn("Local", width="small"),
+                    "Qtde. atual": st.column_config.NumberColumn("Qtde. atual", format="%.3f"),
+                    "Cód. original": st.column_config.TextColumn("Cód. original"),
+                    "Cód. fabricante": st.column_config.TextColumn("Cód. fabricante"),
+                },
+                alt=f"Produtos da ordem {codigo}",
+            )
+            st.caption(
+                "As peças vêm da planilha de produtos da O.S. A descrição é a do pedido vinculado quando a peça é a mesma. "
+                "O total de produtos é a soma de quantidade vezes preço unitário. O desconto fica na linha: "
+                "tipo 1 é valor e tipo 2 é percentual."
+            )
     with servicos:
         st.metric("Total de serviços", brl(linha["total_servicos"]))
         st.info(
