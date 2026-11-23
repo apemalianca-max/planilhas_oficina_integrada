@@ -3821,6 +3821,105 @@ def senha_confere_id(usuario_id: int, senha: str) -> bool:
     return _senha_confere(senha, linha["senha_salt"], linha["senha_hash"])
 
 
+LINK_REPOSICAO = (
+    "https://onedrive.live.com/personal/f6bcc0f900f2d6d6/_layouts/15/doc2.aspx"
+    "?resid=00f2d6d6-c0f9-20bc-80f6-546b00000000&cid=f6bcc0f900f2d6d6"
+)
+LINK_REPOSICAO_EMBUTIDO = (
+    "https://onedrive.live.com/embed?resid=00f2d6d6-c0f9-20bc-80f6-546b00000000"
+    "&cid=f6bcc0f900f2d6d6&em=2"
+)
+
+
+def _parametro(nome: str) -> str:
+    valor = st.query_params.get(nome, "")
+    if isinstance(valor, (list, tuple)):
+        valor = valor[0] if valor else ""
+    return str(valor or "").strip()
+
+
+def url_painel_reposicao() -> str:
+    atual = (st.context.url or "").split("?")[0].rstrip("/")
+    if not atual:
+        atual = "https://planilhasoficinaintegrada-3qrhgcdbmxmiz2meiududc.streamlit.app"
+    return f"{atual}/?painel=reposicao"
+
+
+def pedido_reposicao_aberto() -> bool:
+    return _parametro("painel") == "reposicao"
+
+
+def botao_copiar_link(url: str, chave: str, cor: str = "#16324f") -> None:
+    endereco = json.dumps(url)
+    st.html(
+        f"""
+        <div class="copiar-link" data-copiar="{html.escape(chave, quote=True)}">
+          <button type="button" id="btn-{html.escape(chave)}"
+            style="background:#0c6b4d;color:#f4fbf7;border:1px solid #084a36;border-radius:8px;
+                   padding:0.55rem 1rem;font-weight:700;cursor:pointer;width:100%;">
+            Link
+          </button>
+          <p id="aviso-{html.escape(chave)}" style="margin:0.35rem 0 0;font-size:0.9rem;color:{html.escape(cor)};"></p>
+        </div>
+        <script>
+        (function () {{
+          const botao = document.getElementById("btn-{chave}");
+          const aviso = document.getElementById("aviso-{chave}");
+          if (!botao || botao.dataset.ligado) return;
+          botao.dataset.ligado = "1";
+          botao.addEventListener("click", async function () {{
+            const texto = {endereco};
+            try {{
+              await navigator.clipboard.writeText(texto);
+              aviso.textContent = "Link copiado.";
+            }} catch (erro) {{
+              aviso.textContent = texto;
+            }}
+          }});
+        }})();
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
+
+
+def atalho_reposicao_login() -> None:
+    st.divider()
+    st.subheader("Pedido/Reposição de estoque")
+    st.caption("Entra direto, sem senha. O botão Link copia o endereço deste painel.")
+    abrir, copiar = st.columns(2, vertical_alignment="center")
+    if abrir.button(
+        "Pedido/Reposição de estoque",
+        type="primary",
+        width="stretch",
+        key="abrir_reposicao_login",
+    ):
+        st.query_params["painel"] = "reposicao"
+        st.rerun()
+    with copiar:
+        botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
+
+
+def tela_reposicao_estoque() -> None:
+    st.title("Pedido/Reposição de estoque")
+    st.caption("Este painel abre sem senha. O botão Link copia o endereço para quem for usar.")
+    acao1, acao2, acao3 = st.columns([1, 1, 1], vertical_alignment="center")
+    with acao1:
+        botao_copiar_link(url_painel_reposicao(), "painel")
+    acao2.link_button("Abrir planilha", LINK_REPOSICAO, width="stretch")
+    if acao3.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
+        st.query_params.clear()
+        st.rerun()
+    st.text_input(
+        "Endereço deste painel",
+        value=url_painel_reposicao(),
+        disabled=True,
+        key="endereco_reposicao",
+    )
+    st.iframe(LINK_REPOSICAO_EMBUTIDO, height=680, alt="Planilha de pedido e reposição de estoque")
+    st.caption("Se a planilha não aparecer aqui, use Abrir planilha.")
+
+
 def tela_acesso() -> None:
     estilo_login()
     _, centro, _ = st.columns([1, 1.2, 1])
@@ -3857,6 +3956,7 @@ def tela_acesso() -> None:
                 registrar_log("Acesso", f"Entrou no painel {texto_link_acesso()}.", usuario=usuario)
                 st.session_state.usuario = usuario
                 st.rerun()
+            atalho_reposicao_login()
             return
         st.subheader("Entrar")
         with st.form("login"):
@@ -3877,6 +3977,7 @@ def tela_acesso() -> None:
             registrar_log("Acesso", f"Entrou no painel {texto_link_acesso()}.", usuario=usuario)
             st.session_state.usuario = usuario
             st.rerun()
+        atalho_reposicao_login()
 
 
 def tela_trocar_senha() -> None:
@@ -8639,6 +8740,9 @@ def main() -> None:
         layout="wide",
     )
     esconder_gerenciar()
+    if pedido_reposicao_aberto():
+        tela_reposicao_estoque()
+        return
     try:
         with engine().connect() as conn:
             conn.execute(text("SELECT 1"))
