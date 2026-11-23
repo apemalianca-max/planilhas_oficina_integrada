@@ -6634,7 +6634,10 @@ def painel_contas_next() -> None:
             "Pedido abre o pedido de venda. Baixar abre juros, multa e o pagamento. "
             "Ver documento abre a ficha do que já foi baixado."
             + (
-                " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada."
+                " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
+                "Nas contas em aberto, o valor da dívida é o total das vendas menos o desconto e menos o pagamento parcial. "
+                "Quem não pagou nada fica com o líquido do pedido. A diferença lançada como juros foi retirada. "
+                "O botão de juros calcula esse acréscimo de novo."
                 if tipo == "receber"
                 else ""
             )
