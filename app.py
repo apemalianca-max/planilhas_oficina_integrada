@@ -7984,7 +7984,44 @@ def ficha_pedido(codigo: str) -> None:
     )
     st.subheader("Pedido de venda")
     if pecas.empty:
-        st.info("Pedido não encontrado.")
+        detalhe = detalhe_do_pedido(codigo)
+        if not detalhe:
+            st.info("Pedido não encontrado.")
+            return
+        orcamento_numero = _texto_detalhe(detalhe.get("codorcamento"))
+        cliente = ""
+        condicao = ""
+        entrega = ""
+        if orcamento_numero:
+            quote = query(
+                """
+                SELECT cliente, condicao_pagto, condicao_entrega
+                FROM next_orcamento
+                WHERE numero = ?
+                """,
+                (orcamento_numero,),
+            )
+            if not quote.empty:
+                cliente = texto_limpo(quote.iat[0, 0])
+                condicao = texto_limpo(quote.iat[0, 1])
+                entrega = texto_limpo(quote.iat[0, 2])
+        chave = sem_acento(codigo).replace(" ", "_")
+        mostrar_codigos_vinculados(
+            f"ped_{chave}",
+            _chave_numero(codigo),
+            orcamento_numero,
+            _texto_detalhe(detalhe.get("codos")),
+            _texto_detalhe(detalhe.get("os_oficina")),
+        )
+        st.caption(
+            f"{cliente or 'Sem cliente'} · {data_br(detalhe.get('data')) or 'sem data'} · "
+            f"{condicao or 'sem condição de pagamento'} · {entrega or 'sem condição de entrega'}"
+        )
+        if _texto_detalhe(detalhe.get("observacoes")):
+            st.caption(_texto_detalhe(detalhe.get("observacoes")))
+        if detalhe.get("valor_total") is not None:
+            st.metric("Total do pedido", brl(detalhe.get("valor_total")))
+        st.info("Este pedido não tem a lista de peças na carga de vendas.")
         return
     cab = pecas.iloc[0]
     cliente = texto_limpo(cab["cliente"])
@@ -8033,6 +8070,21 @@ def ficha_pedido(codigo: str) -> None:
     data_entrega = data_br(detalhe.get("data_saida"))
     hora_pedido = _texto_detalhe(detalhe.get("hora"))
     observacao = _texto_detalhe(detalhe.get("observacoes"))
+    condicao_pagto = texto_limpo(cab["condicao"])
+    condicao_entrega = ""
+    if orcamento_numero:
+        condicoes = query(
+            """
+            SELECT condicao_pagto, condicao_entrega
+            FROM next_orcamento
+            WHERE numero = ?
+            """,
+            (orcamento_numero,),
+        )
+        if not condicoes.empty:
+            if not condicao_pagto:
+                condicao_pagto = texto_limpo(condicoes.iat[0, 0])
+            condicao_entrega = texto_limpo(condicoes.iat[0, 1])
     chave = sem_acento(codigo).replace(" ", "_")
     liberado = indagar_edicao("pedido", codigo, f"o pedido {codigo}")
     _preparar_campos("pedido", codigo, liberado)
@@ -8069,12 +8121,12 @@ def ficha_pedido(codigo: str) -> None:
         with c2:
             _campo_pedido("Vendedor", cab["vendedor"], f"ped_{chave}_vend", campo="vendedor")
         with c3:
-            _campo_pedido("Condições de pagamento", cab["condicao"], f"ped_{chave}_pagto", campo="condicao")
+            _campo_pedido("Condições de pagamento", condicao_pagto, f"ped_{chave}_pagto", campo="condicao")
         with c4:
             _campo_pedido("Nota fiscal", nota_numero, f"ped_{chave}_nf", campo="nota")
         c1, c2, c3, c4 = st.columns([2, 1, 3, 1])
         with c1:
-            _campo_pedido("Condições de entrega", "", f"ped_{chave}_ent", campo="cond_entrega")
+            _campo_pedido("Condições de entrega", condicao_entrega, f"ped_{chave}_ent", campo="cond_entrega")
         with c2:
             _campo_pedido("Cód. transportador", "", f"ped_{chave}_codtr", campo="cod_transp")
         with c3:
@@ -8192,7 +8244,8 @@ def ficha_pedido(codigo: str) -> None:
             st.caption("A margem usa o custo de compra gravado hoje no cadastro do produto, não o custo do dia da venda.")
         st.caption(
             "Hora, entrega, observação, desconto, nota e total do pedido vêm da planilha de detalhes quando ela traz o campo. "
-            "As linhas de serviço e os impostos não vieram nessa planilha. Estoque e local são os do cadastro atual."
+            "As linhas de serviço e os impostos não vieram nessa planilha. Estoque e local são os do cadastro atual. "
+            "Quando o pedido não trouxe o nome da peça, as linhas são as do orçamento vinculado com o mesmo total."
         )
     if not notas.empty:
         for nota in notas.itertuples(index=False):
