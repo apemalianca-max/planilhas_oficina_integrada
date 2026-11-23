@@ -4393,6 +4393,96 @@ def click_abrir_busca_conta() -> None:
     _baixa_pela_linha("nx_ids_busca", "nx_click_busca", False)
 
 
+def numero_pedido_texto(texto: str) -> str:
+    bruto = texto_limpo(texto)
+    if not bruto:
+        return ""
+    baixo = sem_acento(bruto).casefold()
+    pos = baixo.find("pedido")
+    if pos < 0:
+        return ""
+    resto = bruto[pos + len("pedido") :].lstrip(" :-")
+    digitos: list[str] = []
+    for caractere in resto:
+        if caractere.isdigit():
+            digitos.append(caractere)
+        elif digitos:
+            break
+        elif caractere.isspace():
+            continue
+        else:
+            break
+    if not digitos:
+        return ""
+    return str(int("".join(digitos)))
+
+
+def codigo_venda_gravado(numero: str) -> str:
+    texto = str(numero or "").strip()
+    if not texto.isdigit():
+        return texto
+    achado = query(
+        """
+        SELECT codvenda
+        FROM next_venda_item
+        WHERE ltrim(codvenda, '0') = ?
+        ORDER BY codvenda
+        LIMIT 1
+        """,
+        (str(int(texto)),),
+    )
+    if achado.empty:
+        return str(int(texto))
+    return texto_limpo(achado.iat[0, 0]) or str(int(texto))
+
+
+def abrir_pedido_painel(numero: str) -> None:
+    codigo = codigo_venda_gravado(numero)
+    if not codigo:
+        return
+    st.session_state.next_baixa_id = None
+    st.session_state.nx_cli_cliente = None
+    st.session_state.nx_cli_nome = None
+    st.session_state.cruz_lista = "pedido"
+    st.session_state.cruz_doc_tipo = "pedido"
+    st.session_state.cruz_doc_id = codigo
+    st.session_state.nx_pedido_da_conta = True
+
+
+def click_pedido_da_lista(chave_numeros: str, chave_click: str) -> None:
+    click = st.session_state.get(chave_click)
+    numeros = list(st.session_state.get(chave_numeros) or [])
+    if click is None:
+        return
+    try:
+        indice = click.row
+    except AttributeError:
+        indice = click["row"]
+    if isinstance(indice, int) and 0 <= indice < len(numeros):
+        numero = str(numeros[indice] or "").strip()
+        if numero:
+            abrir_pedido_painel(numero)
+
+
+def _clique_pedido(chave_numeros: str, chave_click: str):
+    def acao() -> None:
+        click_pedido_da_lista(chave_numeros, chave_click)
+
+    return acao
+
+
+def click_pedido_notas() -> None:
+    click_pedido_da_lista("nx_pedidos_notas", "nx_click_pedido_notas")
+
+
+def click_pedido_recentes() -> None:
+    click_pedido_da_lista("nx_pedidos_recentes", "nx_click_pedido_recentes")
+
+
+def click_pedido_lancamento() -> None:
+    click_pedido_da_lista("nx_pedidos_lancamento", "nx_click_pedido_grade")
+
+
 def click_lancamento_grade() -> None:
     click = st.session_state.get("nx_click_lancamento")
     ids = list(st.session_state.get("nx_ids_lancamento") or [])
@@ -4549,15 +4639,21 @@ def dialogo_notas_cliente() -> None:
         f"Vencidas: {brl(vencido)}. A vencer: {brl(a_vencer)}."
     )
     st.session_state.nx_ids_notas = [int(valor) for valor in linhas["id"].tolist()]
+    descricoes = (
+        linhas["descricao"].map(lambda valor: texto_limpo(valor) or "—")
+        if "descricao" in linhas.columns
+        else pd.Series(["—"] * len(linhas), index=linhas.index)
+    )
+    pedidos = [numero_pedido_texto(valor) for valor in descricoes.tolist()]
+    st.session_state.nx_pedidos_notas = pedidos
     visivel = pd.DataFrame(
         {
             "Código": linhas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
-            "Descrição": linhas["descricao"].map(lambda valor: texto_limpo(valor) or "—")
-            if "descricao" in linhas.columns
-            else "—",
+            "Descrição": descricoes,
             "Vencimento": linhas["vencimento"].map(lambda valor: data_br(valor) or "—"),
             "Situação": ["Vencida" if flag else "A vencer" for flag in linhas["eh_vencida"]],
-            "Valor": linhas["divida"],
+            "Valor da dívida": linhas["divida"],
+            "Pedido": pedidos,
             "Baixar": ["Baixar"] * len(linhas),
         }
     )
@@ -4571,7 +4667,14 @@ def dialogo_notas_cliente() -> None:
             "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
             "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
             "Situação": st.column_config.TextColumn("Situação", width="small"),
-            "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
+            "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
+            "Pedido": st.column_config.ButtonColumn(
+                "Pedido",
+                width="small",
+                help="Abre o pedido de venda citado no histórico",
+                on_click=click_pedido_notas,
+                key="nx_click_pedido_notas",
+            ),
             "Baixar": st.column_config.ButtonColumn(
                 "Baixar",
                 type="primary",
@@ -4652,6 +4755,10 @@ def listar_next_abertas(
     mostrar_dias: bool = True,
 ) -> None:
     st.session_state[chave_ids] = [int(valor) for valor in contas["id"].tolist()]
+    chave_pedido = f"{chave_ids}_pedidos"
+    chave_pedido_click = f"{chave_ids}_pedido_click"
+    pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
+    st.session_state[chave_pedido] = pedidos
     colunas = {
         "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
         "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -4666,6 +4773,7 @@ def listar_next_abertas(
                 strict=True,
             )
         ],
+        "Pedido": pedidos,
         "Baixar": ["Baixar"] * len(contas),
     }
     if mostrar_dias:
@@ -4678,15 +4786,23 @@ def listar_next_abertas(
                 for vencimento, quitado in zip(contas["vencimento"], contas["quitado"], strict=True)
             ],
             "Valor da dívida": colunas["Valor da dívida"],
+            "Pedido": colunas["Pedido"],
             "Baixar": colunas["Baixar"],
         }
     visivel = pd.DataFrame(colunas)
-    tabela = pintar_faixa(visivel, VERMELHO, {"Baixar"}) if vermelho else visivel
+    tabela = pintar_faixa(visivel, VERMELHO, {"Baixar", "Pedido"}) if vermelho else visivel
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
         "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
         "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
         "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
+        "Pedido": st.column_config.ButtonColumn(
+            "Pedido",
+            width="small",
+            help="Abre o pedido de venda citado na descrição",
+            on_click=_clique_pedido(chave_pedido, chave_pedido_click),
+            key=chave_pedido_click,
+        ),
         "Baixar": st.column_config.ButtonColumn(
             "Baixar",
             type="primary",
@@ -4738,12 +4854,15 @@ def listar_pagar_a_vencer_por_mes(contas: pd.DataFrame, total_lista) -> None:
 
 def listar_next_recentes(contas: pd.DataFrame) -> None:
     st.session_state.nx_ids_recentes = [int(valor) for valor in contas["id"].tolist()]
+    pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
+    st.session_state.nx_pedidos_recentes = pedidos
     visivel = pd.DataFrame(
         {
             "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
             "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
             "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
             "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
+            "Pedido": pedidos,
             "Ver documento": ["Ver documento"] * len(contas),
             "Reabrir baixa": ["Reabrir baixa"] * len(contas),
         }
@@ -4758,6 +4877,13 @@ def listar_next_recentes(contas: pd.DataFrame) -> None:
             "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
             "Pagamento": st.column_config.TextColumn("Pagamento", width="small"),
             "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
+            "Pedido": st.column_config.ButtonColumn(
+                "Pedido",
+                width="small",
+                help="Abre o pedido de venda citado na descrição",
+                on_click=click_pedido_recentes,
+                key="nx_click_pedido_recentes",
+            ),
             "Ver documento": st.column_config.ButtonColumn(
                 "Ver documento",
                 type="primary",
@@ -4781,6 +4907,7 @@ def abrir_baixa_next(conta_id: int, reabrir: bool = False, ver: bool = False) ->
     st.session_state.next_baixa_reabrir = bool(reabrir)
     st.session_state.next_baixa_ver = bool(ver)
     st.session_state.next_baixa_init = None
+    st.session_state.nx_pedido_da_conta = False
 
 
 def fechar_baixa_next() -> None:
@@ -5396,7 +5523,10 @@ def _painel_operacao_contas(tipo: str) -> None:
         if vencidas.empty:
             st.info("Nenhuma conta vencida.")
         else:
-            st.caption("Estas contas já passaram do vencimento e ainda não foram quitadas. Baixar abre juros e multa.")
+            st.caption(
+                "Estas contas já passaram do vencimento e ainda não foram quitadas. "
+                "Pedido abre o pedido de venda. Baixar abre juros e multa."
+            )
             listar_next_abertas(
                 vencidas,
                 chave_ids="nx_ids_vencidas",
@@ -5414,7 +5544,10 @@ def _painel_operacao_contas(tipo: str) -> None:
         if a_vencer.empty:
             st.info("Nenhuma conta em aberto por vencer.")
         else:
-            st.caption("No dia seguinte ao vencimento, se não forem quitadas, passam para a lista vermelha.")
+            st.caption(
+                "No dia seguinte ao vencimento, se não forem quitadas, passam para a lista vermelha. "
+                "Pedido abre o pedido de venda."
+            )
             listar_next_abertas(
                 a_vencer,
                 chave_ids="nx_ids_avencer",
@@ -5618,7 +5751,9 @@ def painel_contas_next() -> None:
         "Data Emissão",
         "Histórico Lançamento",
         "Data pagto.",
+        "Valor da dívida",
         "Valor da Baixa",
+        "Pedido",
     ]
     buscar = bool(st.session_state.get("nx_busca_feita")) and st.session_state.get("nx_busca_tipo") == tipo
     frame = pd.DataFrame()
@@ -5627,7 +5762,8 @@ def painel_contas_next() -> None:
         frame = query(
             f"""
             SELECT codigo, duplicata, vencimento, nome, historico, data_pagamento,
-                   valor_baixa, COALESCE(valor_pago, 0) AS valor_pago, quitado, id
+                   valor_baixa, COALESCE(valor_liquido, 0) AS valor_liquido,
+                   COALESCE(valor_pago, 0) AS valor_pago, quitado, id
             FROM next_lancamento
             {where}
             ORDER BY CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END, vencimento, codigo
@@ -5637,9 +5773,12 @@ def painel_contas_next() -> None:
         st.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
         pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
         baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
+        divida = pd.to_numeric(frame["valor_liquido"], errors="coerce").fillna(0)
         quitado_flag = frame["quitado"].map(lambda valor: str(valor or "").strip().casefold() == "sim")
+        pedidos = [numero_pedido_texto(valor) for valor in frame["historico"].tolist()]
         st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
         st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
+        st.session_state.nx_pedidos_lancamento = pedidos
         visivel = pd.DataFrame(
             {
                 "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -5649,13 +5788,16 @@ def painel_contas_next() -> None:
                 "Data Emissão": "",
                 "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
                 "Data pagto.": frame["data_pagamento"].map(data_br),
+                "Valor da dívida": divida,
                 "Valor da Baixa": pago.where(pago > 0, baixa_planilha),
+                "Pedido": pedidos,
                 "Documento": ["Ver documento" if flag else "Baixar" for flag in quitado_flag],
             }
         )
         st.caption(
-            "Valor da Baixa é o valor pago neste painel. "
-            "Baixar abre juros, multa e o pagamento. Ver documento abre a ficha do que já foi baixado."
+            "Valor da dívida é o valor do lançamento. Valor da Baixa é o valor pago neste painel. "
+            "Pedido abre o pedido de venda. Baixar abre juros, multa e o pagamento. "
+            "Ver documento abre a ficha do que já foi baixado."
         )
         st.dataframe(
             visivel,
@@ -5663,7 +5805,15 @@ def painel_contas_next() -> None:
             hide_index=True,
             height=420,
             column_config={
+                "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f"),
                 "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f"),
+                "Pedido": st.column_config.ButtonColumn(
+                    "Pedido",
+                    width="small",
+                    help="Abre o pedido de venda citado no histórico",
+                    on_click=click_pedido_lancamento,
+                    key="nx_click_pedido_grade",
+                ),
                 "Documento": st.column_config.ButtonColumn(
                     "Documento",
                     type="primary",
@@ -5711,6 +5861,8 @@ def painel_contas_next() -> None:
     _painel_operacao_contas(tipo)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
+    elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
+        dialogo_documento_cruz()
 
 
 def ir_contas_receber() -> None:
@@ -6076,6 +6228,8 @@ def clientes_next() -> None:
     mostrar_totais_cliente(base)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
+    elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
+        dialogo_documento_cruz()
 
 
 DOC_CRUZ = (
@@ -6103,6 +6257,7 @@ def abrir_documento_cruz() -> None:
 
 def fechar_documento_cruz() -> None:
     st.session_state.cruz_doc_id = None
+    st.session_state.nx_pedido_da_conta = False
 
 
 def ir_documento_cruz(tipo: str, codigo: str) -> None:
