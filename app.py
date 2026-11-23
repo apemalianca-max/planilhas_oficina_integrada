@@ -1986,6 +1986,27 @@ def gravar_conta_baixa(
         ).mappings().first()
         if antes is None:
             return
+        registrar_alteracoes(
+            "baixa_oficina",
+            texto_banco(antes["os"]) or str(conta_id),
+            {
+                "quitado": texto_banco(antes.get("quitado")),
+                "valor_pago": antes.get("valor_pago"),
+                "data_pagamento": data_br(antes.get("dt_pagamento")),
+                "juros": antes.get("juros") if "juros" in antes else "",
+                "multa": antes.get("multa") if "multa" in antes else "",
+                "obs_conta": texto_banco(antes.get("obs_conta")),
+            },
+            {
+                "quitado": quitado,
+                "valor_pago": round(pago, 2),
+                "data_pagamento": data_br(pagamento),
+                "juros": round(juros, 2),
+                "multa": round(multa, 2),
+                "obs_conta": obs,
+            },
+            conn,
+        )
         campos = """
             quitado = :quitado,
             dt_pagamento = :pagamento,
@@ -3248,6 +3269,221 @@ def registrar_log(
         proprio.execute(sql, params)
 
 
+def garantir_historico() -> None:
+    if st.session_state.get("historico_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_alteracao (
+                    id bigserial PRIMARY KEY,
+                    quando timestamptz NOT NULL DEFAULT now(),
+                    usuario_nome text,
+                    usuario_login text,
+                    escopo text NOT NULL,
+                    registro text NOT NULL,
+                    campo text NOT NULL,
+                    anterior text,
+                    novo text
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS painel_alteracao_quando
+                ON painel_alteracao (quando DESC)
+                """
+            )
+        )
+    st.session_state.historico_ok = True
+
+
+def _igual_historico(anterior, novo) -> bool:
+    antes = texto_banco(anterior)
+    depois = texto_banco(novo)
+    if antes == depois:
+        return True
+    try:
+        if abs(float(antes.replace(",", ".")) - float(depois.replace(",", "."))) < 0.001:
+            return True
+    except ValueError:
+        pass
+    data_antes, data_depois = data_iso(antes), data_iso(depois)
+    return bool(data_antes and data_depois and data_antes == data_depois)
+
+
+def registrar_alteracoes(escopo: str, registro: str, antes: dict, depois: dict, conn=None) -> int:
+    garantir_historico()
+    usuario = st.session_state.get("usuario") or {}
+    nome = (usuario.get("nome") or "").strip() or None
+    login = (usuario.get("login") or "").strip() or None
+    mudancas = [
+        (campo, texto_banco(antes.get(campo)), texto_banco(depois.get(campo)))
+        for campo in depois
+        if not _igual_historico(antes.get(campo), depois.get(campo))
+    ]
+    if not mudancas:
+        return 0
+    sql = text(
+        """
+        INSERT INTO painel_alteracao
+            (usuario_nome, usuario_login, escopo, registro, campo, anterior, novo)
+        VALUES
+            (:usuario_nome, :usuario_login, :escopo, :registro, :campo, :anterior, :novo)
+        """
+    )
+
+    def gravar(destino) -> None:
+        for campo, anterior, novo in mudancas:
+            destino.execute(
+                sql,
+                {
+                    "usuario_nome": nome,
+                    "usuario_login": login,
+                    "escopo": escopo,
+                    "registro": str(registro),
+                    "campo": campo,
+                    "anterior": anterior or None,
+                    "novo": novo or None,
+                },
+            )
+
+    if conn is not None:
+        gravar(conn)
+    else:
+        with engine().begin() as proprio:
+            gravar(proprio)
+    return len(mudancas)
+
+
+def listar_alteracoes(escopo: str | None = None, registro: str | None = None, limite: int = 500) -> pd.DataFrame:
+    garantir_historico()
+    filtros = []
+    params: dict = {"limite": int(limite)}
+    if escopo:
+        filtros.append("escopo = :escopo")
+        params["escopo"] = escopo
+    if registro:
+        filtros.append("registro = :registro")
+        params["registro"] = str(registro)
+    where = f"WHERE {' AND '.join(filtros)}" if filtros else ""
+    with engine().connect() as conn:
+        linhas = conn.execute(
+            text(
+                f"""
+                SELECT quando AT TIME ZONE 'America/Sao_Paulo' AS quando,
+                       COALESCE(usuario_nome, '') AS usuario,
+                       COALESCE(usuario_login, '') AS login,
+                       escopo, registro, campo,
+                       COALESCE(anterior, '') AS anterior,
+                       COALESCE(novo, '') AS novo
+                FROM painel_alteracao
+                {where}
+                ORDER BY id DESC
+                LIMIT :limite
+                """
+            ),
+            params,
+        ).mappings().all()
+    frame = pd.DataFrame(linhas)
+    if frame.empty:
+        return pd.DataFrame(columns=["quando", "usuario", "login", "escopo", "registro", "campo", "anterior", "novo"])
+    frame["quando"] = pd.to_datetime(frame["quando"])
+    return frame
+
+
+ROTULO_ESCOPO = {
+    "pedido": "Pedido",
+    "os": "Ordem de serviço",
+    "cadastro_cliente": "Cliente",
+    "cadastro_fornecedor": "Fornecedor",
+    "produto": "Produto",
+    "servico": "Serviço",
+    "baixa_next": "Baixa NeXT",
+    "baixa_oficina": "Baixa oficina",
+}
+ROTULO_CAMPO_HIST = {
+    "emissao": "Data de emissão",
+    "entrega": "Data de entrega",
+    "baixa": "Data da baixa",
+    "status": "Status",
+    "cliente": "Cliente",
+    "vendedor": "Vendedor",
+    "condicao": "Condição",
+    "cond_entrega": "Condição de entrega",
+    "obs": "Observação",
+    "extra": "Observação",
+    "funcionario": "Funcionário",
+    "veiculo": "Veículo",
+    "chassi": "Chassi",
+    "tipo": "Tipo",
+    "nome": "Nome",
+    "fantasia": "Fantasia",
+    "documento": "Documento",
+    "telefone": "Telefone",
+    "email": "E-mail",
+    "endereco": "Endereço",
+    "bairro": "Bairro",
+    "cidade": "Cidade",
+    "descricao": "Descrição",
+    "marca": "Marca",
+    "grupo": "Grupo",
+    "unidade": "Unidade",
+    "local_estoque": "Local",
+    "estoque": "Estoque",
+    "estoque_minimo": "Estoque mínimo",
+    "preco_venda": "Preço",
+    "valor": "Valor",
+    "quitado": "Quitado",
+    "valor_pago": "Valor pago",
+    "data_pagamento": "Data do pagamento",
+    "juros": "Juros",
+    "multa": "Multa",
+    "obs_conta": "Obs",
+}
+
+
+def mostrar_historico_alteracao(escopo: str | None = None, registro: str | None = None) -> None:
+    if not usuario_admin():
+        return
+    registros = listar_alteracoes(escopo, registro)
+    st.subheader("Histórico de alterações")
+    st.caption("Valor anterior e valor novo de cada campo gravado pelo administrador.")
+    if registros.empty:
+        st.info("Nenhuma alteração gravada ainda." if not escopo else "Nenhuma alteração gravada neste registro.")
+        return
+    tabela = registros.copy()
+    tabela["escopo"] = tabela["escopo"].map(lambda valor: ROTULO_ESCOPO.get(str(valor), str(valor)))
+    tabela["campo"] = tabela["campo"].map(lambda valor: ROTULO_CAMPO_HIST.get(str(valor), str(valor)))
+    tabela = tabela.rename(
+        columns={
+            "quando": "Quando",
+            "usuario": "Usuário",
+            "login": "Login",
+            "escopo": "Onde",
+            "registro": "Registro",
+            "campo": "Campo",
+            "anterior": "Antes",
+            "novo": "Depois",
+        }
+    )
+    st.dataframe(
+        tabela,
+        hide_index=True,
+        width="stretch",
+        height=min(420, max(160, 48 + len(tabela) * 35)),
+        column_config={
+            "Quando": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
+            "Antes": st.column_config.TextColumn("Antes", width="medium"),
+            "Depois": st.column_config.TextColumn("Depois", width="medium"),
+        },
+        alt="Histórico de alterações",
+    )
+
+
 def listar_log(limite: int = 400) -> pd.DataFrame:
     colunas = ["quando", "usuario", "login", "acao", "modulo", "origem", "detalhe"]
     with engine().connect() as conn:
@@ -3823,6 +4059,54 @@ def aba_log() -> None:
         },
         alt="Acessos e alterações do painel",
     )
+    st.divider()
+    alteracoes = listar_alteracoes()
+    st.subheader("Histórico de alterações")
+    st.caption("Antes e depois de cada campo gravado, para conferir um erro. O registro começa a partir de agora.")
+    if alteracoes.empty:
+        st.info("Nenhuma alteração de campo gravada ainda.")
+    else:
+        termo_alt = st.text_input(
+            "Pesquisar alteração",
+            placeholder="Usuário, registro, campo ou valor",
+            key="busca_alteracao",
+        )
+        grade = alteracoes.copy()
+        if termo_alt.strip():
+            mascara = pd.Series(False, index=grade.index)
+            for coluna in ("usuario", "login", "escopo", "registro", "campo", "anterior", "novo"):
+                mascara = mascara | contem_termo(grade[coluna].astype(str), termo_alt)
+            grade = grade.loc[mascara]
+        if grade.empty:
+            st.info("Nenhuma alteração com esse filtro.")
+        else:
+            grade["escopo"] = grade["escopo"].map(lambda valor: ROTULO_ESCOPO.get(str(valor), str(valor)))
+            grade["campo"] = grade["campo"].map(lambda valor: ROTULO_CAMPO_HIST.get(str(valor), str(valor)))
+            grade = grade.rename(
+                columns={
+                    "quando": "Quando",
+                    "usuario": "Usuário",
+                    "login": "Login",
+                    "escopo": "Onde",
+                    "registro": "Registro",
+                    "campo": "Campo",
+                    "anterior": "Antes",
+                    "novo": "Depois",
+                }
+            )
+            st.caption(f"{inteiro(len(grade))} alteração(ões).")
+            st.dataframe(
+                grade,
+                hide_index=True,
+                width="stretch",
+                height=480,
+                column_config={
+                    "Quando": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
+                    "Antes": st.column_config.TextColumn("Antes", width="medium"),
+                    "Depois": st.column_config.TextColumn("Depois", width="medium"),
+                },
+                alt="Histórico de alterações do administrador",
+            )
 
 
 def esconder_gerenciar() -> None:
@@ -5014,7 +5298,8 @@ def gravar_next_baixa(
         antes = conn.execute(
             text(
                 """
-                SELECT codigo, nome, historico
+                SELECT codigo, nome, historico, quitado, valor_pago, data_pagamento,
+                       obs_conta, juros, multa
                 FROM next_lancamento
                 WHERE id = :id
                 """
@@ -5023,6 +5308,27 @@ def gravar_next_baixa(
         ).mappings().first()
         if antes is None:
             return
+        registrar_alteracoes(
+            "baixa_next",
+            texto_banco(antes["codigo"]) or str(conta_id),
+            {
+                "quitado": texto_banco(antes.get("quitado")),
+                "valor_pago": antes.get("valor_pago"),
+                "data_pagamento": data_br(antes.get("data_pagamento")),
+                "juros": antes.get("juros"),
+                "multa": antes.get("multa"),
+                "obs_conta": texto_banco(antes.get("obs_conta")),
+            },
+            {
+                "quitado": quitado,
+                "valor_pago": round(pago, 2),
+                "data_pagamento": data_br(pagamento),
+                "juros": round(juros, 2),
+                "multa": round(multa, 2),
+                "obs_conta": obs,
+            },
+            conn,
+        )
         conn.execute(
             text(
                 """
@@ -6486,9 +6792,16 @@ def gravar_campos(escopo: str, registro: str, valores: dict[str, str]) -> None:
                 ),
                 {"escopo": escopo, "registro": str(registro), "campo": campo, "valor": valor},
             )
+        mudancas = registrar_alteracoes(
+            escopo,
+            registro,
+            dict(st.session_state.get("nx_antes") or {}),
+            valores,
+            conn,
+        )
         registrar_log(
             "Edição",
-            f"Alterou {escopo} {registro}: {len(valores)} campo(s).",
+            f"Alterou {escopo} {registro}: {mudancas} campo(s).",
             modulo="NeXT",
             conn=conn,
         )
@@ -6525,6 +6838,7 @@ def _preparar_campos(escopo: str, registro: str, liberado: bool) -> None:
     st.session_state.nx_overlay = campos_salvos(escopo, registro)
     st.session_state.nx_editavel = liberado
     st.session_state.nx_mapa_campos = {}
+    st.session_state.nx_antes = {}
 
 
 def _valores_editados() -> dict[str, str]:
@@ -6546,6 +6860,9 @@ def _campo_pedido(rotulo: str, valor, chave: str, travado: bool = False, campo: 
     mapa = dict(st.session_state.get("nx_mapa_campos") or {})
     mapa[chave] = nome
     st.session_state.nx_mapa_campos = mapa
+    antes = dict(st.session_state.get("nx_antes") or {})
+    antes[nome] = texto
+    st.session_state.nx_antes = antes
     editavel = (not travado) and bool(st.session_state.get("nx_editavel"))
     if not editavel:
         st.text_input(rotulo, value=texto, disabled=True, key=chave)
@@ -6810,6 +7127,7 @@ def painel_do_cliente(nome: str, chave: str, papel: str = "cliente") -> None:
             st.success("Cadastro gravado.")
             st.rerun()
         st.session_state.nx_editavel = False
+        mostrar_historico_alteracao(f"cadastro_{papel}", codigo_cad)
     if papel != "cliente":
         compras = query(
             """
@@ -7147,6 +7465,7 @@ def ficha_pedido(codigo: str) -> None:
                 f"Abrir orçamento {nota.orcamento}", key=f"cruz_ir_orc_{nota.codigo}"
             ):
                 ir_documento_cruz("orcamento", str(nota.orcamento))
+    mostrar_historico_alteracao("pedido", codigo)
 
 
 def ficha_os(codigo: str) -> None:
@@ -7223,6 +7542,7 @@ def ficha_os(codigo: str) -> None:
         t1.metric("Total produtos", brl(linha["total_produtos"]))
         t2.metric("Total serviços", brl(linha["total_servicos"]))
         t3.metric("Total da ordem", brl(linha["total"]))
+    mostrar_historico_alteracao("os", codigo)
 
 
 @st.dialog("Documento", width=1100, on_dismiss=fechar_documento_cruz)
@@ -7916,6 +8236,29 @@ def tela_produtos(reposicao: bool = False) -> None:
                         "codigo": texto_banco(item.codigo),
                     },
                 )
+            origem = {texto_banco(linha.codigo): linha for linha in frame.itertuples(index=False)}
+            colunas_prod = (
+                "descricao",
+                "marca",
+                "grupo",
+                "unidade",
+                "local_estoque",
+                "estoque",
+                "estoque_minimo",
+                "preco_venda",
+            )
+            for item in editado.itertuples(index=False):
+                codigo_item = texto_banco(item.codigo)
+                antigo = origem.get(codigo_item)
+                if antigo is None:
+                    continue
+                registrar_alteracoes(
+                    "produto",
+                    codigo_item,
+                    {coluna: getattr(antigo, coluna) for coluna in colunas_prod},
+                    {coluna: getattr(item, coluna) for coluna in colunas_prod},
+                    conn,
+                )
             registrar_log("Edição", f"Alterou {len(editado)} produto(s).", modulo="NeXT", conn=conn)
         st.cache_data.clear()
         st.success("Produtos gravados.")
@@ -7975,6 +8318,20 @@ def tela_servicos() -> None:
                         "valor": None if pd.isna(item.valor) else float(item.valor),
                         "codigo": texto_banco(item.codigo),
                     },
+                )
+            origem = {texto_banco(linha.codigo): linha for linha in frame.itertuples(index=False)}
+            colunas_srv = ("descricao", "unidade", "valor")
+            for item in editado.itertuples(index=False):
+                codigo_item = texto_banco(item.codigo)
+                antigo = origem.get(codigo_item)
+                if antigo is None:
+                    continue
+                registrar_alteracoes(
+                    "servico",
+                    codigo_item,
+                    {coluna: getattr(antigo, coluna) for coluna in colunas_srv},
+                    {coluna: getattr(item, coluna) for coluna in colunas_srv},
+                    conn,
                 )
             registrar_log("Edição", f"Alterou {len(editado)} serviço(s).", modulo="NeXT", conn=conn)
         st.cache_data.clear()
