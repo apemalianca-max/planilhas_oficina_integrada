@@ -5156,16 +5156,63 @@ def codigos_do_vinculo(itens: list[dict]) -> dict[str, str]:
     }
 
 
+def abrir_codigo_vinculado(tipo: str, numero: str) -> None:
+    numero = _chave_numero(numero)
+    if not numero:
+        return
+    na_oficina = st.session_state.get("modulo") == "os"
+    if tipo == "os_oficina":
+        abrir_os_oficina(numero)
+        return
+    if na_oficina and tipo == "os_next":
+        st.session_state.fin_os_perguntar = None
+        st.session_state.fin_os_aberta = None
+        st.session_state.modulo = "pv"
+        st.session_state.tela_next = "os"
+        st.session_state.menu_next_aberto = "Ordem de Serviço"
+        st.session_state.tela_next_rotulo = "Ordem de Serviço · Ordens de serviço"
+        st.session_state.next_baixa_id = None
+        st.session_state.nx_pedido_da_conta = False
+        st.session_state.nx_os_da_conta = False
+        st.session_state.cruz_lista = "os"
+        st.session_state.cruz_doc_tipo = "os"
+        st.session_state.cruz_doc_id = codigo_registrado("next_os", "codigo", numero)
+        st.rerun()
+        return
+    if na_oficina:
+        abrir_documento_next("orcamento" if tipo == "orcamento" else "pedido", numero)
+        return
+    if tipo == "os_next":
+        ir_documento_cruz("os", codigo_registrado("next_os", "codigo", numero))
+        return
+    if tipo == "orcamento":
+        ir_documento_cruz("orcamento", codigo_registrado("next_orcamento", "numero", numero))
+        return
+    ir_documento_cruz("pedido", codigo_venda_gravado(numero))
+
+
+def _botoes_vinculo(rotulo: str, numeros: str, tipo: str, chave: str) -> None:
+    st.markdown(f"**{rotulo}**")
+    partes = [parte.strip() for parte in (numeros or "").split(",") if parte.strip() and parte.strip() != "—"]
+    if not partes:
+        st.caption("—")
+        return
+    with st.container(horizontal=True, gap="small"):
+        for numero in partes:
+            if st.button(numero, key=f"{chave}_{tipo}_{numero}", help=f"Abre {rotulo} {numero}"):
+                abrir_codigo_vinculado(tipo, numero)
+
+
 def mostrar_codigos_vinculados(chave: str, pedido: str, orcamento: str, os_next: str, os_oficina: str) -> None:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.text_input("Pedido de venda", value=pedido or "—", disabled=True, key=f"{chave}_vped")
+        _botoes_vinculo("Pedido de venda", pedido, "pedido", chave)
     with c2:
-        st.text_input("Orçamento", value=orcamento or "—", disabled=True, key=f"{chave}_vorc")
+        _botoes_vinculo("Orçamento", orcamento, "orcamento", chave)
     with c3:
-        st.text_input("O.S. NeXT", value=os_next or "—", disabled=True, key=f"{chave}_vnext")
+        _botoes_vinculo("O.S. NeXT", os_next, "os_next", chave)
     with c4:
-        st.text_input("O.S. O. Integrada", value=os_oficina or "—", disabled=True, key=f"{chave}_vofi")
+        _botoes_vinculo("O.S. O. Integrada", os_oficina, "os_oficina", chave)
 
 
 def _frase_pedidos(itens: list[dict]) -> str:
