@@ -3859,7 +3859,7 @@ def botao_copiar_link(url: str, chave: str, cor: str = "#16324f") -> None:
           <button type="button" id="btn-{html.escape(chave)}"
             style="background:#0c6b4d;color:#f4fbf7;border:1px solid #084a36;border-radius:8px;
                    padding:0.55rem 1rem;font-weight:700;cursor:pointer;width:100%;">
-            Link
+            Copiar link
           </button>
           <p id="aviso-{html.escape(chave)}" style="margin:0.35rem 0 0;font-size:0.9rem;color:{html.escape(cor)};"></p>
         </div>
@@ -3888,18 +3888,8 @@ def botao_copiar_link(url: str, chave: str, cor: str = "#16324f") -> None:
 def atalho_reposicao_login() -> None:
     st.divider()
     st.subheader("Pedido/Reposição de estoque")
-    st.caption("Entra direto, sem senha. O botão Link copia o endereço deste painel.")
-    abrir, copiar = st.columns(2, vertical_alignment="center")
-    if abrir.button(
-        "Pedido/Reposição de estoque",
-        type="primary",
-        width="stretch",
-        key="abrir_reposicao_login",
-    ):
-        st.query_params["painel"] = "reposicao"
-        st.rerun()
-    with copiar:
-        botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
+    st.caption("Sem senha. Copie o link para abrir ou compartilhar este painel.")
+    botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
 
 
 def garantir_pedido_reposicao() -> None:
@@ -4034,7 +4024,7 @@ def excluir_item_pedido() -> None:
 
 def tela_reposicao_estoque(interno: bool = False) -> None:
     st.title("Pedido/Reposição de estoque")
-    st.caption("Os itens da planilha de pedidos. O botão Link copia o endereço deste painel.")
+    st.caption("Os itens da planilha de pedidos.")
     acao1, acao2 = st.columns([1, 1], vertical_alignment="center")
     with acao1:
         botao_copiar_link(url_painel_reposicao(), "painel")
