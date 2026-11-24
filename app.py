@@ -1060,6 +1060,10 @@ def baixa_recente(quando: date | None, hoje: date | None = None) -> bool:
     return (hoje or date.today()) - quando <= timedelta(days=DIAS_EDICAO_BAIXA)
 
 
+DIAS_TOPO_VENCIDO = 3
+DESTAQUE_DIAS = "background-color: #9f1239; color: #ffffff; font-weight: 700"
+
+
 def dias_em_atraso(vencimento, quitado, hoje: date | None = None) -> int | None:
     if texto_banco(quitado).casefold() == "sim":
         return None
@@ -1070,6 +1074,88 @@ def dias_em_atraso(vencimento, quitado, hoje: date | None = None) -> int | None:
     if dias <= 0:
         return None
     return dias
+
+
+def chave_ordem_receber(vencimento, quitado, hoje: date | None = None) -> tuple[int, int]:
+    hoje = hoje or date.today()
+    quando = data_iso(vencimento)
+    pago = texto_banco(quitado).casefold() == "sim"
+    if quando is None or pago:
+        return (3, 0)
+    dias = (hoje - quando).days
+    if 1 <= dias <= DIAS_TOPO_VENCIDO:
+        return (0, -quando.toordinal())
+    if dias > DIAS_TOPO_VENCIDO:
+        return (1, quando.toordinal())
+    return (2, quando.toordinal())
+
+
+def ordenar_contas_receber(frame: pd.DataFrame, vencimento: str = "vencimento", quitado: str = "quitado") -> pd.DataFrame:
+    if frame.empty or vencimento not in frame.columns or quitado not in frame.columns:
+        return frame
+    hoje = date.today()
+    chaves = [
+        chave_ordem_receber(quando, situacao, hoje)
+        for quando, situacao in zip(frame[vencimento], frame[quitado], strict=True)
+    ]
+    ordem = pd.DataFrame(chaves, index=frame.index, columns=["_grupo", "_posicao"])
+    saida = frame.copy()
+    saida["_grupo"] = ordem["_grupo"]
+    saida["_posicao"] = ordem["_posicao"]
+    return saida.sort_values(["_grupo", "_posicao"], kind="mergesort").drop(columns=["_grupo", "_posicao"])
+
+
+def _dias_celula(valor) -> int | None:
+    if valor is None or valor is pd.NA:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except TypeError:
+        pass
+    texto = str(valor).strip()
+    if not texto or texto in {"—", "-", "None", "<NA>"}:
+        return None
+    try:
+        numero = int(float(texto.replace(",", ".")))
+    except ValueError:
+        return None
+    return numero if numero > 0 else None
+
+
+def pintar_dias_vencidos(
+    frame: pd.DataFrame,
+    coluna: str,
+    exceto: set[str] | None = None,
+    faixa: str = "",
+):
+    if frame.empty or coluna not in frame.columns:
+        return frame
+    limite = int(pd.options.styler.render.max_elements)
+    if frame.size > limite:
+        pd.set_option("styler.render.max_elements", int(frame.size))
+    pular = set(exceto or ())
+    if not faixa:
+        def cor_coluna(serie: pd.Series) -> list[str]:
+            return [DESTAQUE_DIAS if _dias_celula(valor) else "" for valor in serie]
+
+        return frame.style.apply(cor_coluna, subset=[coluna])
+
+    def cor(linha):
+        numero = _dias_celula(linha.get(coluna))
+        saida = []
+        for nome in linha.index:
+            if nome in pular:
+                saida.append("")
+            elif nome == coluna and numero is not None:
+                saida.append(DESTAQUE_DIAS)
+            elif faixa and numero is not None:
+                saida.append(faixa)
+            else:
+                saida.append("")
+        return saida
+
+    return frame.style.apply(cor, axis=1)
 
 
 def serie_dias_vencidos(frame: pd.DataFrame) -> pd.Series:
@@ -6166,7 +6252,12 @@ def listar_next_abertas(
             }
     visivel = pd.DataFrame(colunas)
     exceto = {"Baixar", "Pedido", "O.S. NeXT", "O.S. Oficina"}
-    tabela = pintar_faixa(visivel, VERMELHO, exceto) if vermelho else visivel
+    if mostrar_dias and "Dias vencidos" in visivel.columns:
+        tabela = pintar_dias_vencidos(visivel, "Dias vencidos", exceto, VERMELHO if vermelho else "")
+    elif vermelho:
+        tabela = pintar_faixa(visivel, VERMELHO, exceto)
+    else:
+        tabela = visivel
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
         "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
@@ -6685,13 +6776,18 @@ def dialogo_baixa_next() -> None:
         disparar_impressao(html_promissoria(dados_nota))
 
 
-def tabela_next(frame: pd.DataFrame, tipo: str) -> None:
+def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False) -> None:
     if frame.empty:
         st.info("Nenhuma conta encontrada com esses filtros.")
         return
     visivel = format_frame(com_dias_vencidos(frame))
     config = column_config(list(visivel.columns))
-    tabela = pintar_nao_pagas(visivel) if "quitado" in visivel.columns else visivel
+    if destacar_dias and "dias_vencidos" in visivel.columns:
+        tabela = pintar_dias_vencidos(visivel, "dias_vencidos", faixa=VERMELHO)
+    elif "quitado" in visivel.columns:
+        tabela = pintar_nao_pagas(visivel)
+    else:
+        tabela = visivel
     st.dataframe(
         tabela,
         width="stretch",
@@ -6917,6 +7013,8 @@ def _painel_operacao_contas(tipo: str) -> None:
         """,
         tuple([tipo, *params_busca]),
     )
+    if tipo == "receber" and not abertas.empty:
+        abertas = ordenar_contas_receber(abertas)
     vencimento = pd.to_datetime(abertas["vencimento"], errors="coerce") if not abertas.empty else pd.Series(dtype="datetime64[ns]")
     vencidas_mask = vencimento.notna() & (vencimento < pd.Timestamp(date.today()))
     vencidas = abertas.loc[vencidas_mask] if not abertas.empty else abertas
@@ -6974,8 +7072,13 @@ def _painel_operacao_contas(tipo: str) -> None:
             st.info("Nenhuma conta vencida.")
         else:
             st.caption(
-                "Estas contas já passaram do vencimento e ainda não foram quitadas. "
-                "Pedido abre o pedido de venda. Baixar abre juros e multa."
+                (
+                    "As que venceram nos últimos 3 dias ficam no topo, da mais recente para a mais antiga. "
+                    "Depois vêm as que estão vencidas há mais tempo. O número de dias fica em destaque. "
+                    if tipo == "receber"
+                    else "Estas contas já passaram do vencimento e ainda não foram quitadas. "
+                )
+                + "Pedido abre o pedido de venda. Baixar abre juros e multa."
                 + (
                     " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada."
                     if tipo == "receber"
@@ -7032,10 +7135,16 @@ def _painel_operacao_contas(tipo: str) -> None:
         listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber")
     st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
     st.subheader("Todas as contas")
-    st.caption(
-        f"Contas recebidas nos últimos {DIAS_EDICAO_BAIXA} dias ficam no topo das recebidas, "
-        "da baixa mais nova para a mais antiga. Depois desse prazo elas seguem a ordem de vencimento."
-    )
+    if tipo == "receber":
+        st.caption(
+            "No topo ficam, por 3 dias, as contas que acabaram de vencer, da mais recente para a mais antiga. "
+            "Em seguida vêm as vencidas há mais tempo. O número de dias fica em destaque. A pesquisa usa a mesma ordem."
+        )
+    else:
+        st.caption(
+            f"Contas pagas nos últimos {DIAS_EDICAO_BAIXA} dias ficam no topo, "
+            "da baixa mais nova para a mais antiga. Depois desse prazo elas seguem a ordem de vencimento."
+        )
     quadro_quitado = query(
         """
         SELECT DISTINCT quitado
@@ -7100,26 +7209,56 @@ def _painel_operacao_contas(tipo: str) -> None:
         "lower(COALESCE(quitado, '')) = 'sim' "
         "AND substr(COALESCE(CAST(data_pagamento AS TEXT), ''), 1, 10) >= ?"
     )
+    if tipo == "receber":
+        ordem_sql = """
+            CASE
+                WHEN lower(COALESCE(quitado, '')) = 'sim' OR vencimento IS NULL THEN 3
+                WHEN CAST(vencimento AS date) < CURRENT_DATE
+                 AND CAST(vencimento AS date) >= CURRENT_DATE - INTERVAL '3 days' THEN 0
+                WHEN CAST(vencimento AS date) < CURRENT_DATE THEN 1
+                ELSE 2
+            END,
+            CASE
+                WHEN lower(COALESCE(quitado, '')) <> 'sim'
+                 AND CAST(vencimento AS date) < CURRENT_DATE
+                 AND CAST(vencimento AS date) >= CURRENT_DATE - INTERVAL '3 days'
+                THEN CAST(vencimento AS date)
+            END DESC NULLS LAST,
+            CASE
+                WHEN lower(COALESCE(quitado, '')) <> 'sim'
+                 AND CAST(vencimento AS date) < CURRENT_DATE - INTERVAL '3 days'
+                THEN CAST(vencimento AS date)
+            END ASC NULLS LAST,
+            CAST(vencimento AS date) ASC NULLS LAST, codigo
+        """
+        params_ordem: list = []
+    else:
+        ordem_sql = f"""
+            CASE WHEN lower(COALESCE(quitado, '')) <> 'sim' THEN 0 ELSE 1 END,
+            CASE WHEN {recebida} THEN 0 ELSE 1 END,
+            CASE WHEN {recebida} THEN data_pagamento END DESC,
+            CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END,
+            vencimento, codigo
+        """
+        params_ordem = [limite_recente, limite_recente]
     frame = query(
         f"""
         SELECT codigo, {descricao_sql} AS descricao, duplicata, vencimento, quitado,
                valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
                data_pagamento AS dt_pagamento
         FROM next_lancamento{where}
-        ORDER BY CASE WHEN lower(COALESCE(quitado, '')) <> 'sim' THEN 0 ELSE 1 END,
-                 CASE WHEN {recebida} THEN 0 ELSE 1 END,
-                 CASE WHEN {recebida} THEN data_pagamento END DESC,
-                 CASE WHEN vencimento IS NULL THEN 1 ELSE 0 END,
-                 vencimento, codigo
+        ORDER BY {ordem_sql}
         LIMIT ?
         """,
-        tuple([*params, limite_recente, limite_recente, int(limite)]),
+        tuple([*params, *params_ordem, int(limite)]),
     )
     m1, m2, m3 = st.columns(3)
     m1.metric("Linhas no filtro", inteiro(totais.iat[0, 0] or 0))
     m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
     m3.metric("Valor baixado", brl(totais.iat[0, 2]))
-    tabela_next(frame, "fin")
+    if tipo == "receber" and not frame.empty:
+        frame = ordenar_contas_receber(frame)
+    tabela_next(frame, "fin", destacar_dias=tipo == "receber")
 
 
 def painel_contas_next() -> None:
@@ -7227,6 +7366,7 @@ def painel_contas_next() -> None:
         "Pedido",
     ]
     if tipo == "receber":
+        colunas.insert(colunas.index("Data Vencto.") + 1, "Dias vencidos")
         colunas.extend(["O.S. NeXT", "O.S. Oficina"])
     buscar = bool(st.session_state.get("nx_busca_feita")) and st.session_state.get("nx_busca_tipo") == tipo
     frame = pd.DataFrame()
@@ -7243,6 +7383,8 @@ def painel_contas_next() -> None:
             """,
             tuple(params),
         )
+        if tipo == "receber" and not frame.empty:
+            frame = ordenar_contas_receber(frame)
         st.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
         pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
         baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
@@ -7256,6 +7398,16 @@ def painel_contas_next() -> None:
             "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
             "Duplicata": frame["duplicata"].map(lambda valor: texto_limpo(valor) or "—"),
             "Data Vencto.": frame["vencimento"].map(data_br),
+            **(
+                {
+                    "Dias vencidos": [
+                        dias_em_atraso(vencimento, situacao)
+                        for vencimento, situacao in zip(frame["vencimento"], frame["quitado"], strict=True)
+                    ]
+                }
+                if tipo == "receber"
+                else {}
+            ),
             "Nome/Razão Social": frame["nome"].map(lambda valor: texto_limpo(valor) or "—"),
             "Data Emissão": "",
             "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -7280,17 +7432,26 @@ def painel_contas_next() -> None:
                 " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
                 "Nas contas em aberto, o valor da dívida é o total das vendas menos o desconto e menos o pagamento parcial. "
                 "Quem não pagou nada fica com o líquido do pedido. A diferença lançada como juros foi retirada. "
-                "O botão de juros calcula esse acréscimo de novo."
+                "O botão de juros calcula esse acréscimo de novo. "
+                "No topo ficam, por 3 dias, as que acabaram de vencer, da mais recente para a mais antiga. "
+                "Depois vêm as vencidas há mais tempo. O número de dias fica em destaque."
                 if tipo == "receber"
                 else ""
             )
         )
+        if tipo == "receber" and "Dias vencidos" in visivel.columns:
+            visivel = pintar_dias_vencidos(
+                visivel,
+                "Dias vencidos",
+                {"Pedido", "O.S. NeXT", "O.S. Oficina", "Documento"},
+            )
         st.dataframe(
             visivel,
             width="stretch",
             hide_index=True,
             height=420,
             column_config={
+                "Dias vencidos": st.column_config.NumberColumn("Dias vencidos", format="%d", width="small"),
                 "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f"),
                 "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f"),
                 "Pedido": st.column_config.ButtonColumn(
