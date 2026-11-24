@@ -7647,14 +7647,15 @@ def painel_contas_next() -> None:
                 else ""
             )
         )
+        tabela = visivel
         if tipo == "receber" and "Dias vencidos" in visivel.columns:
-            visivel = pintar_dias_vencidos(
+            tabela = pintar_dias_vencidos(
                 visivel,
                 "Dias vencidos",
                 {"Pedido", "O.S. NeXT", "O.S. Oficina", "Documento"},
             )
         st.dataframe(
-            visivel,
+            tabela,
             width="stretch",
             hide_index=True,
             height=420,
