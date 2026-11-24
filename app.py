@@ -4959,6 +4959,15 @@ def garantir_orcamento_item() -> None:
     st.session_state.orcamento_item_ok = True
 
 
+def garantir_nf_fiscal() -> None:
+    if st.session_state.get("nf_fiscal_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(text("ALTER TABLE next_nf_saida ADD COLUMN IF NOT EXISTS chave text"))
+        conn.execute(text("ALTER TABLE next_nf_saida ADD COLUMN IF NOT EXISTS protocolo text"))
+    st.session_state.nf_fiscal_ok = True
+
+
 def _texto_detalhe(valor) -> str:
     if valor is None:
         return ""
@@ -7300,27 +7309,36 @@ def _grade_documentos(lista: pd.DataFrame, pessoa: str) -> None:
             "Valor": lista["valor"].map(lambda valor: float(valor or 0)),
         }
     )
+    if "protocolo" in lista.columns:
+        grade.insert(5, "Protocolo", lista["protocolo"].map(lambda valor: texto_limpo(valor) or "—"))
+    if "chave" in lista.columns:
+        grade.insert(6 if "protocolo" in lista.columns else 5, "Chave", lista["chave"].map(lambda valor: texto_limpo(valor) or "—"))
+    colunas = {
+        "Abrir": st.column_config.ButtonColumn(
+            "Abrir",
+            type="primary",
+            width="small",
+            help="Abre o documento com as peças e os eventos",
+            on_click=abrir_documento_cruz,
+            key="cruz_click",
+        ),
+        "Número": st.column_config.TextColumn("Número", width="small"),
+        "Data": st.column_config.TextColumn("Data", width="small"),
+        pessoa: st.column_config.TextColumn(pessoa, width="large"),
+        "Situação": st.column_config.TextColumn("Situação", width="small"),
+        "Peças": st.column_config.NumberColumn("Peças", format="%d", width="small"),
+        "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
+    }
+    if "Protocolo" in grade.columns:
+        colunas["Protocolo"] = st.column_config.TextColumn("Protocolo")
+    if "Chave" in grade.columns:
+        colunas["Chave"] = st.column_config.TextColumn("Chave", width="large")
     st.dataframe(
         pintar_situacao_aberta(grade, {"Abrir"}),
         width="stretch",
         hide_index=True,
         height=min(560, max(180, 48 + len(grade) * 36)),
-        column_config={
-            "Abrir": st.column_config.ButtonColumn(
-                "Abrir",
-                type="primary",
-                width="small",
-                help="Abre o documento com as peças e os eventos",
-                on_click=abrir_documento_cruz,
-                key="cruz_click",
-            ),
-            "Número": st.column_config.TextColumn("Número", width="small"),
-            "Data": st.column_config.TextColumn("Data", width="small"),
-            pessoa: st.column_config.TextColumn(pessoa, width="large"),
-            "Situação": st.column_config.TextColumn("Situação", width="small"),
-            "Peças": st.column_config.NumberColumn("Peças", format="%d", width="small"),
-            "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
-        },
+        column_config=colunas,
         alt="Documentos do cruzamento",
     )
 
@@ -8647,9 +8665,10 @@ def dialogo_documento_cruz() -> None:
                     st.rerun()
         return
     if tipo == "saida":
+        garantir_nf_fiscal()
         cab = query(
             """
-            SELECT codigo, data, cliente, valor, nota, orcamento, status, vendedor, condicao
+            SELECT codigo, data, cliente, valor, nota, orcamento, status, vendedor, condicao, chave, protocolo
             FROM next_nf_saida
             WHERE codigo = ?
             """,
@@ -8666,6 +8685,12 @@ def dialogo_documento_cruz() -> None:
             f"{data_br(cab.iat[0, 1]) or 'sem data'} · {texto_limpo(cab.iat[0, 6]) or 'sem status'} · "
             f"{texto_limpo(cab.iat[0, 7]) or 'sem vendedor'}"
         )
+        chave_acesso = texto_limpo(cab.iat[0, 9])
+        protocolo = texto_limpo(cab.iat[0, 10])
+        st.caption("Chave de acesso " + (chave_acesso or "sem chave no XML"))
+        if chave_acesso:
+            st.code(chave_acesso, language=None)
+        st.caption("Protocolo " + (protocolo or "sem protocolo"))
         st.metric("Valor da nota", brl(cab.iat[0, 3]))
         pecas = query(
             """
@@ -8830,13 +8855,14 @@ def painel_cruzamento(mostrar_menu: bool = True) -> None:
             )
             pessoa = "Cliente"
         elif ativa == "saida":
-            where, params = _where_doc(termo, "n.codigo", ["n.cliente", "n.nota", "n.orcamento"])
+            garantir_nf_fiscal()
+            where, params = _where_doc(termo, "n.codigo", ["n.cliente", "n.nota", "n.orcamento", "n.chave", "n.protocolo"])
             lista = query(
                 f"""
                 SELECT n.codigo AS codigo, n.data AS data, n.cliente AS pessoa, n.status AS situacao,
                        (SELECT COUNT(*) FROM next_venda_item v
                         WHERE TRIM(COALESCE(n.nota, '')) <> '' AND v.nota = n.nota) AS itens,
-                       n.valor AS valor
+                       n.valor AS valor, n.protocolo, n.chave
                 FROM next_nf_saida n
                 {where}
                 ORDER BY n.data DESC NULLS LAST, n.codigo DESC
