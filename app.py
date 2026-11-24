@@ -3902,8 +3902,34 @@ def atalho_reposicao_login() -> None:
         botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
 
 
+LIMITE_PEDIDOS_REPOSICAO = 500
+
+
+def aparar_pedidos_reposicao(conn) -> None:
+    conn.execute(
+        text(
+            """
+            DELETE FROM painel_pedido_reposicao
+            WHERE linha < (
+                SELECT MIN(recentes.linha) FROM (
+                    SELECT linha
+                    FROM painel_pedido_reposicao
+                    ORDER BY linha DESC
+                    LIMIT :limite
+                ) recentes
+            )
+            """
+        ),
+        {"limite": LIMITE_PEDIDOS_REPOSICAO},
+    )
+
+
 def garantir_pedido_reposicao() -> None:
-    if st.session_state.get("pedido_reposicao_ok") and st.session_state.get("pedido_reposicao_observacao_ok"):
+    if (
+        st.session_state.get("pedido_reposicao_ok")
+        and st.session_state.get("pedido_reposicao_observacao_ok")
+        and st.session_state.get("pedido_reposicao_limite_ok")
+    ):
         return
     with engine().begin() as conn:
         conn.execute(
@@ -3932,8 +3958,11 @@ def garantir_pedido_reposicao() -> None:
         conn.execute(
             text("ALTER TABLE painel_pedido_reposicao ADD COLUMN IF NOT EXISTS observacao text")
         )
+        aparar_pedidos_reposicao(conn)
     st.session_state.pedido_reposicao_ok = True
     st.session_state.pedido_reposicao_observacao_ok = True
+    st.session_state.pedido_reposicao_limite_ok = True
+    ler_pedidos_reposicao.clear()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -3944,6 +3973,7 @@ def ler_pedidos_reposicao() -> pd.DataFrame:
                preco, marca, preco_2, marca_2, preco_3, marca_3, preco_4, marca_4
         FROM painel_pedido_reposicao
         ORDER BY linha DESC
+        LIMIT 500
         """
     )
 
@@ -4021,6 +4051,7 @@ def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: s
                     "observacao": observacao or None,
                 },
             )
+            aparar_pedidos_reposicao(conn)
     except Exception:
         st.session_state.repo_ok = ""
         st.session_state.repo_aviso = "Não foi possível lançar este produto. Clique de novo em Reposição ou Vendido."
@@ -4117,7 +4148,7 @@ def excluir_item_pedido() -> None:
 
 def tela_reposicao_estoque(interno: bool = False) -> None:
     st.title("Pedido/Reposição de estoque")
-    st.caption("Os itens da planilha de pedidos.")
+    st.caption("A lista guarda no máximo 500 lançamentos. Cada produto novo apaga o último.")
     acao1, acao2 = st.columns([1, 1], vertical_alignment="center")
     with acao1:
         botao_copiar_link(url_painel_reposicao(), "painel")
@@ -4140,6 +4171,8 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         vender = botao_ve.form_submit_button("Vendido", type="primary", width="stretch")
     if repor or vender:
         lancar_item_pedido("VE" if vender else "RE", codigo, descricao, observacao)
+        if st.session_state.get("repo_ok"):
+            st.rerun()
     aviso = st.session_state.pop("repo_aviso", "")
     if aviso:
         st.warning(aviso)
@@ -4181,7 +4214,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         visivel = visivel[mascara]
     if escolha != "Todas":
         visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
-    st.caption(f"{inteiro(len(visivel))} itens. O lançamento novo entra na primeira linha.")
+    st.caption(f"{inteiro(len(visivel))} itens, no máximo {inteiro(LIMITE_PEDIDOS_REPOSICAO)}. O lançamento novo entra na primeira linha.")
     st.session_state.repo_linhas_excluir = [int(valor) for valor in visivel["linha"].tolist()]
     visivel = visivel.copy()
     visivel["descricao"] = [
