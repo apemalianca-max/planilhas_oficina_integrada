@@ -3978,10 +3978,14 @@ def rotulo_marcacao(valor) -> str:
 
 
 def pintar_vendido(frame: pd.DataFrame):
+    limite = int(pd.options.styler.render.max_elements)
+    if frame.size > limite:
+        pd.set_option("styler.render.max_elements", int(frame.size))
+
     def cor(linha):
         vendido = str(linha.get("RE/VE") or "").casefold() == "vendido"
         tinta = "background-color: #0c6b4d; color: #f4fbf7; font-weight: 700" if vendido else ""
-        return ["" if coluna in {"Pedido", "Fornecedor", "Excluir"} else tinta for coluna in linha.index]
+        return [tinta if coluna == "RE/VE" else "" for coluna in linha.index]
 
     return frame.style.apply(cor, axis=1)
 
