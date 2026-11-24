@@ -3919,6 +3919,9 @@ def garantir_pedido_reposicao() -> None:
                 """
             )
         )
+        conn.execute(
+            text("ALTER TABLE painel_pedido_reposicao ADD COLUMN IF NOT EXISTS observacao text")
+        )
     st.session_state.pedido_reposicao_ok = True
 
 
@@ -3926,7 +3929,7 @@ def garantir_pedido_reposicao() -> None:
 def ler_pedidos_reposicao() -> pd.DataFrame:
     return query(
         """
-        SELECT linha, quantidade, marcacao, situacao, loja, codigo, descricao,
+        SELECT linha, quantidade, marcacao, situacao, loja, codigo, descricao, observacao,
                preco, marca, preco_2, marca_2, preco_3, marca_3, preco_4, marca_4
         FROM painel_pedido_reposicao
         ORDER BY linha DESC
@@ -3946,9 +3949,18 @@ def _texto_planilha(valor) -> str | None:
     return texto or None
 
 
+def descricao_com_observacao(descricao, observacao) -> str:
+    base = _texto_planilha(descricao) or ""
+    nota = _texto_planilha(observacao) or ""
+    if nota:
+        return f"{base} ({nota})".strip()
+    return base
+
+
 def lancar_item_pedido(marcacao: str) -> None:
     codigo = str(st.session_state.get("repo_codigo") or "").strip()
     descricao = str(st.session_state.get("repo_descricao") or "").strip()
+    observacao = str(st.session_state.get("repo_observacao") or "").strip()
     if not codigo and not descricao:
         st.session_state.repo_aviso = "Digite o código ou a descrição do produto."
         return
@@ -3957,8 +3969,8 @@ def lancar_item_pedido(marcacao: str) -> None:
         conn.execute(
             text(
                 """
-                INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao)
-                VALUES (:linha, :marcacao, :codigo, :descricao)
+                INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao, observacao)
+                VALUES (:linha, :marcacao, :codigo, :descricao, :observacao)
                 """
             ),
             {
@@ -3966,10 +3978,12 @@ def lancar_item_pedido(marcacao: str) -> None:
                 "marcacao": marcacao,
                 "codigo": codigo or None,
                 "descricao": descricao or None,
+                "observacao": observacao or None,
             },
         )
     st.session_state.repo_codigo = ""
     st.session_state.repo_descricao = ""
+    st.session_state.repo_observacao = ""
     st.session_state.repo_aviso = ""
     ler_pedidos_reposicao.clear()
     st.rerun()
@@ -4040,6 +4054,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     campo_codigo, campo_descricao = st.columns(2)
     campo_codigo.text_input("Código do produto", key="repo_codigo")
     campo_descricao.text_input("Descrição", key="repo_descricao")
+    campo_descricao.text_input("Observação", key="repo_observacao")
     botao_re, botao_ve = st.columns(2)
     botao_re.button("Reposição", type="primary", width="stretch", key="repo_re", on_click=lancar_item_pedido, args=("RE",))
     botao_ve.button(
@@ -4064,7 +4079,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         return
     termo = st.text_input(
         "Pesquisar",
-        placeholder="Código, descrição, marca ou fornecedor",
+        placeholder="Código, descrição, observação, marca ou fornecedor",
         key="busca_pedido_reposicao",
     ).strip()
     lojas = {}
@@ -4080,7 +4095,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     visivel = frame
     if termo:
         alvo = termo.casefold()
-        colunas = ["marcacao", "situacao", "loja", "codigo", "descricao", "marca", "marca_2", "marca_3", "marca_4"]
+        colunas = ["marcacao", "situacao", "loja", "codigo", "descricao", "observacao", "marca", "marca_2", "marca_3", "marca_4"]
         mascara = False
         for coluna in colunas:
             mascara = mascara | visivel[coluna].fillna("").map(lambda valor: alvo in str(valor).casefold())
@@ -4089,6 +4104,11 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
     st.caption(f"{inteiro(len(visivel))} itens. O lançamento novo entra na primeira linha.")
     st.session_state.repo_linhas_excluir = [int(valor) for valor in visivel["linha"].tolist()]
+    visivel = visivel.copy()
+    visivel["descricao"] = [
+        descricao_com_observacao(descricao, observacao)
+        for descricao, observacao in zip(visivel["descricao"], visivel["observacao"])
+    ]
     grade = visivel.rename(
         columns={
             "linha": "Linha",
