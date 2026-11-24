@@ -1083,8 +1083,10 @@ def chave_ordem_receber(vencimento, quitado, hoje: date | None = None) -> tuple[
     hoje = hoje or date.today()
     quando = data_iso(vencimento)
     pago = texto_banco(quitado).casefold() == "sim"
-    if quando is None or pago:
+    if pago:
         return (3, 0)
+    if quando is None:
+        return (2, 0)
     dias = (hoje - quando).days
     if 1 <= dias <= DIAS_TOPO_VENCIDO:
         return (0, -quando.toordinal())
@@ -1093,14 +1095,20 @@ def chave_ordem_receber(vencimento, quitado, hoje: date | None = None) -> tuple[
     return (2, quando.toordinal())
 
 
-def ordenar_contas_receber(frame: pd.DataFrame, vencimento: str = "vencimento", quitado: str = "quitado") -> pd.DataFrame:
+def ordenar_contas_receber(
+    frame: pd.DataFrame,
+    vencimento: str = "vencimento",
+    quitado: str = "quitado",
+    manter_aberto: list[bool] | None = None,
+) -> pd.DataFrame:
     if frame.empty or vencimento not in frame.columns or quitado not in frame.columns:
         return frame
     hoje = date.today()
-    chaves = [
-        chave_ordem_receber(quando, situacao, hoje)
-        for quando, situacao in zip(frame[vencimento], frame[quitado], strict=True)
-    ]
+    chaves = []
+    for indice, (quando, situacao) in enumerate(zip(frame[vencimento], frame[quitado], strict=True)):
+        if manter_aberto and indice < len(manter_aberto) and manter_aberto[indice]:
+            situacao = "Nao"
+        chaves.append(chave_ordem_receber(quando, situacao, hoje))
     ordem = pd.DataFrame(chaves, index=frame.index, columns=["_grupo", "_posicao"])
     saida = frame.copy()
     saida["_grupo"] = ordem["_grupo"]
@@ -6721,18 +6729,161 @@ def click_pedido_lancamento() -> None:
     click_pedido_da_lista("nx_pedidos_lancamento", "nx_click_pedido_grade")
 
 
+def _numeros_vinculo(texto: str) -> list[str]:
+    vistos = []
+    for parte in str(texto or "").split(","):
+        numero = _chave_numero(parte)
+        if numero and numero not in vistos:
+            vistos.append(numero)
+    return vistos
+
+
+def conta_baixa_os_next(numero: str) -> dict | None:
+    chave = _chave_numero(numero)
+    if not chave:
+        return None
+    frame = query(
+        """
+        SELECT id, quitado, valor_liquido, vencimento
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+          AND ltrim(trim(COALESCE(codigo, '')), '0') = ?
+        ORDER BY id
+        """,
+        (chave,),
+    )
+    return _conta_do_documento(frame, "valor_liquido", None)
+
+
+def valor_os_next(numero: str) -> float | None:
+    chave = _chave_numero(numero)
+    if not chave:
+        return None
+    total = scalar(
+        "SELECT total FROM next_os WHERE ltrim(trim(COALESCE(codigo, '')), '0') = ?",
+        (chave,),
+    )
+    return _numero_documento(total)
+
+
+def _conta_os_em_aberto(numero: str, oficina: bool) -> bool:
+    if oficina:
+        codigo = numero_os(numero)
+        conta = conta_baixa_os(codigo, None) if codigo is not None else None
+    else:
+        conta = conta_baixa_os_next(numero)
+    return bool(conta) and str(conta["quitado"] or "").strip().casefold() != "sim"
+
+
+def linha_com_documento_aberto(oficina: str, os_next: str) -> bool:
+    for numero in _numeros_vinculo(oficina):
+        if _conta_os_em_aberto(numero, True):
+            return True
+    for numero in _numeros_vinculo(os_next):
+        if _conta_os_em_aberto(numero, False):
+            return True
+    return False
+
+
 def click_lancamento_grade() -> None:
     click = st.session_state.get("nx_click_lancamento")
     ids = list(st.session_state.get("nx_ids_lancamento") or [])
     modos = list(st.session_state.get("nx_modo_lancamento") or [])
+    pedidos = list(st.session_state.get("nx_pedidos_lancamento") or [])
+    oficinas = list(st.session_state.get("nx_os_oficina_lancamento") or [])
+    proximas = list(st.session_state.get("nx_os_next_lancamento") or [])
     if click is None:
         return
     try:
         indice = click.row
     except AttributeError:
         indice = click["row"]
-    if isinstance(indice, int) and 0 <= indice < len(ids):
-        abrir_baixa_next(int(ids[indice]), False, modos[indice] == "ver")
+    if not isinstance(indice, int) or not 0 <= indice < len(ids):
+        return
+    pedido = pedidos[indice] if indice < len(pedidos) else ""
+    oficina = oficinas[indice] if indice < len(oficinas) else ""
+    proxima = proximas[indice] if indice < len(proximas) else ""
+    if _numeros_vinculo(pedido) and (_numeros_vinculo(oficina) or _numeros_vinculo(proxima)):
+        st.session_state.nx_baixa_docs = {
+            "pedido": pedido,
+            "os_oficina": oficina,
+            "os_next": proxima,
+        }
+        st.session_state.next_baixa_id = None
+        st.session_state.fin_baixa_id = None
+        return
+    st.session_state.nx_baixa_docs = None
+    abrir_baixa_next(int(ids[indice]), False, indice < len(modos) and modos[indice] == "ver")
+
+
+def fechar_baixa_documentos() -> None:
+    st.session_state.nx_baixa_docs = None
+
+
+def _abrir_baixa_escolhida(origem: str, conta_id: int, quitado: bool) -> None:
+    st.session_state.nx_baixa_docs = None
+    if origem == "oficina":
+        abrir_baixa(int(conta_id), ver=quitado)
+    else:
+        abrir_baixa_next(int(conta_id), ver=quitado)
+    st.rerun()
+
+
+def _cartao_baixa_pedido(pedido: str) -> None:
+    valor = valor_documento_pedido(pedido)
+    conta = conta_baixa_pedido(pedido, valor)
+    st.metric(f"Pedido {pedido}", brl(valor) if valor is not None else "—")
+    if not conta:
+        st.caption("Sem conta de baixa deste pedido.")
+        return
+    quitado = str(conta["quitado"] or "").strip().casefold() == "sim"
+    st.caption("Quitado" if quitado else "Em aberto")
+    if st.button("Baixa do pedido", type="primary", key=f"par_ped_{pedido}", width="stretch"):
+        _abrir_baixa_escolhida("next", int(conta["id"]), quitado)
+
+
+def _cartao_baixa_os(numero: str, oficina: bool) -> None:
+    if oficina:
+        codigo = numero_os(numero)
+        valor = valor_documento_os(codigo) if codigo is not None else None
+        conta = conta_baixa_os(codigo, valor) if codigo is not None else None
+        titulo = f"O.S. {numero}"
+        origem = "oficina"
+    else:
+        valor = valor_os_next(numero)
+        conta = conta_baixa_os_next(numero)
+        titulo = f"O.S. NeXT {numero}"
+        origem = "next"
+    st.metric(titulo, brl(valor) if valor is not None else "—")
+    if not conta:
+        st.caption("Sem conta de baixa desta O.S.")
+        return
+    quitado = str(conta["quitado"] or "").strip().casefold() == "sim"
+    st.caption("Quitado" if quitado else "Em aberto")
+    if st.button("Baixa da O.S.", type="primary", key=f"par_os_{origem}_{numero}", width="stretch"):
+        _abrir_baixa_escolhida(origem, int(conta["id"]), quitado)
+
+
+@st.dialog("Baixa dos documentos", width="large", on_dismiss=fechar_baixa_documentos)
+def dialogo_baixa_documentos() -> None:
+    dados = st.session_state.get("nx_baixa_docs") or {}
+    pedidos = _numeros_vinculo(dados.get("pedido"))
+    oficinas = _numeros_vinculo(dados.get("os_oficina"))
+    proximas = _numeros_vinculo(dados.get("os_next"))
+    st.caption("Pedido e O.S. têm baixas separadas. Só o documento quitado sai do topo da lista.")
+    cartoes = [("pedido", numero) for numero in pedidos]
+    cartoes += [("oficina", numero) for numero in oficinas]
+    cartoes += [("next", numero) for numero in proximas]
+    if not cartoes:
+        st.info("Não há pedido nem O.S. nesta linha.")
+        return
+    colunas = st.columns(len(cartoes))
+    for coluna, (tipo, numero) in zip(colunas, cartoes, strict=True):
+        with coluna:
+            if tipo == "pedido":
+                _cartao_baixa_pedido(numero)
+            else:
+                _cartao_baixa_os(numero, tipo == "oficina")
 
 
 def click_abrir_pessoa() -> None:
@@ -8252,12 +8403,26 @@ def painel_contas_next() -> None:
             tuple(params),
         )
         if tipo == "receber" and not frame.empty:
-            frame = ordenar_contas_receber(frame)
+            pedidos_ordem = [numero_pedido_texto(valor) for valor in frame["historico"].tolist()]
+            os_next_ordem, os_oficina_ordem, _os_top_ordem = rotulos_os_pedido(pedidos_ordem)
+            frame = frame.copy()
+            frame["_aberto_vinculo"] = [
+                str(situacao or "").strip().casefold() != "sim"
+                or linha_com_documento_aberto(oficina, proxima)
+                for situacao, oficina, proxima in zip(
+                    frame["quitado"], os_oficina_ordem, os_next_ordem, strict=True
+                )
+            ]
+            frame = ordenar_contas_receber(
+                frame, manter_aberto=frame["_aberto_vinculo"].tolist()
+            )
         st.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
         pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
         baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
         divida = pd.to_numeric(frame["valor_liquido"], errors="coerce").fillna(0)
         quitado_flag = frame["quitado"].map(lambda valor: str(valor or "").strip().casefold() == "sim")
+        if "_aberto_vinculo" in frame.columns:
+            quitado_flag = [not bool(valor) for valor in frame["_aberto_vinculo"].tolist()]
         pedidos = [numero_pedido_texto(valor) for valor in frame["historico"].tolist()]
         st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
         st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
@@ -8269,8 +8434,16 @@ def painel_contas_next() -> None:
             **(
                 {
                     "Dias vencidos": [
-                        dias_em_atraso(vencimento, situacao)
-                        for vencimento, situacao in zip(frame["vencimento"], frame["quitado"], strict=True)
+                        dias_em_atraso(
+                            vencimento,
+                            "Nao" if aberto else situacao,
+                        )
+                        for vencimento, situacao, aberto in zip(
+                            frame["vencimento"],
+                            frame["quitado"],
+                            frame["_aberto_vinculo"] if "_aberto_vinculo" in frame.columns else [False] * len(frame),
+                            strict=True,
+                        )
                     ]
                 }
                 if tipo == "receber"
@@ -8362,6 +8535,7 @@ def painel_contas_next() -> None:
                     "Documento",
                     type="primary",
                     width=84,
+                    help="Abre a baixa. Se a linha tiver pedido e O.S., mostra os dois documentos.",
                     on_click=click_lancamento_grade,
                     key="nx_click_lancamento",
                 ),
@@ -8403,8 +8577,12 @@ def painel_contas_next() -> None:
     else:
         mostrar_planilha(pd.DataFrame(columns=colunas), width="stretch", hide_index=True, height=180, alt="Lançamentos")
     _painel_operacao_contas(tipo)
-    if st.session_state.get("next_baixa_id"):
+    if st.session_state.get("fin_baixa_id"):
+        dialogo_baixa()
+    elif st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
+    elif st.session_state.get("nx_baixa_docs"):
+        dialogo_baixa_documentos()
     elif st.session_state.get("nx_os_da_conta") and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
     elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
