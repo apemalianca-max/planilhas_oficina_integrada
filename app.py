@@ -4567,6 +4567,23 @@ def aparar_pedidos_reposicao(conn) -> None:
     )
 
 
+def apagar_ultimo_pedido(conn) -> None:
+    conn.execute(
+        text(
+            """
+            DELETE FROM painel_pedido_reposicao
+            WHERE linha = (
+                SELECT linha
+                FROM painel_pedido_reposicao
+                ORDER BY linha ASC
+                LIMIT 1
+            )
+            AND (SELECT COUNT(*) FROM painel_pedido_reposicao) > 1
+            """
+        )
+    )
+
+
 def garantir_pedido_reposicao() -> None:
     if (
         st.session_state.get("pedido_reposicao_ok")
@@ -4694,10 +4711,15 @@ def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: s
                     "observacao": observacao or None,
                 },
             )
+            apagar_ultimo_pedido(conn)
             aparar_pedidos_reposicao(conn)
-    except Exception:
+    except Exception as erro:
         st.session_state.repo_ok = ""
-        st.session_state.repo_aviso = "Não foi possível lançar este produto. Clique de novo em Reposição ou Vendido."
+        aviso = re.sub(r"postgres(?:ql)?(?:\+psycopg)?://\S+", "", str(erro))
+        st.session_state.repo_aviso = (
+            "Não foi possível lançar este produto. "
+            + (aviso[:160] or "Clique de novo em Reposição ou Vendido.")
+        )
         return
     ler_pedidos_reposicao.clear()
     _atualizar_grade_pedidos()
@@ -4786,7 +4808,19 @@ def excluir_item_pedido() -> None:
         )
     ler_pedidos_reposicao.clear()
     _atualizar_grade_pedidos()
-    st.rerun()
+
+
+def _lancar_reposicao(marcacao: str) -> None:
+    lancar_item_pedido(
+        marcacao,
+        str(st.session_state.get("repo_codigo") or ""),
+        str(st.session_state.get("repo_descricao") or ""),
+        str(st.session_state.get("repo_observacao") or ""),
+    )
+    if st.session_state.get("repo_ok"):
+        st.session_state.repo_codigo = ""
+        st.session_state.repo_descricao = ""
+        st.session_state.repo_observacao = ""
 
 
 def tela_reposicao_estoque(interno: bool = False) -> None:
@@ -4802,20 +4836,30 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     elif acao2.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
         st.query_params.clear()
         st.rerun()
+    excluir_item_pedido()
     st.subheader("Lançar produto")
-    st.caption("Clique em Reposição ou Vendido para gravar. Pedido, quantidade e fornecedor ficam para digitar na lista.")
-    with st.form("lancar_produto_pedido", clear_on_submit=True, border=False):
-        campo_codigo, campo_descricao = st.columns(2)
-        codigo = campo_codigo.text_input("Código do produto", placeholder="INSERIR CÓDIGO")
-        descricao = campo_descricao.text_input("Descrição", placeholder="EX: FILTRO")
-        observacao = campo_descricao.text_input("Observação", placeholder="EX: PEDIR BOSCH")
-        botao_re, botao_ve = st.columns(2)
-        repor = botao_re.form_submit_button("Reposição", type="primary", width="stretch")
-        vender = botao_ve.form_submit_button("Vendido", type="primary", width="stretch")
-    if repor or vender:
-        lancar_item_pedido("VE" if vender else "RE", codigo, descricao, observacao)
-        if st.session_state.get("repo_ok"):
-            st.rerun()
+    st.caption("Clique em Reposição ou Vendido para gravar. O produto entra na primeira linha e o último da lista sai. Pedido, quantidade e fornecedor ficam para digitar na lista.")
+    campo_codigo, campo_descricao = st.columns(2)
+    campo_codigo.text_input("Código do produto", placeholder="INSERIR CÓDIGO", key="repo_codigo")
+    campo_descricao.text_input("Descrição", placeholder="EX: FILTRO", key="repo_descricao")
+    campo_descricao.text_input("Observação", placeholder="EX: PEDIR BOSCH", key="repo_observacao")
+    botao_re, botao_ve = st.columns(2)
+    botao_re.button(
+        "Reposição",
+        type="primary",
+        width="stretch",
+        key="repo_btn_re",
+        on_click=_lancar_reposicao,
+        args=("RE",),
+    )
+    botao_ve.button(
+        "Vendido",
+        type="primary",
+        width="stretch",
+        key="repo_btn_ve",
+        on_click=_lancar_reposicao,
+        args=("VE",),
+    )
     aviso = st.session_state.pop("repo_aviso", "")
     if aviso:
         st.warning(aviso)
@@ -4912,7 +4956,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         height=640,
         row_height=ALTURA_LINHA_PLANILHA,
         num_rows="fixed",
-        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Qtde", "Fornecedor", "Excluir"}],
+        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Qtde", "Fornecedor"}],
         column_config={
             "Excluir": st.column_config.ButtonColumn(
                 "Excluir",
@@ -6156,18 +6200,54 @@ def juntar_numeros(*grupos) -> str:
     return ", ".join(vistos)
 
 
+URL_OFICINA_TOP = "https://sistema.oficinatop.com.br/dashboard"
+
+
 def mensagem_os_top(numero: str) -> str:
     texto = str(numero or "").strip() or "informada"
     return (
         f"A O.S. {texto} pertence ao sistema Oficina Top. "
-        f"Acesse o login do novo sistema e procure pela O.S. {texto}."
+        f"Abra o painel e procure pela O.S. {texto}."
     )
 
 
-def mostrar_aviso_os_top() -> None:
+def href_os_top(numero: str) -> str:
+    texto = str(numero or "").strip()
+    if not texto or texto == "—":
+        return ""
+    return f"{URL_OFICINA_TOP}#{texto.replace(' ', '')}"
+
+
+def links_os_top(numeros: list[str]) -> list[str]:
+    return [href_os_top(numero) for numero in numeros]
+
+
+def coluna_os_top(largura="small"):
+    return st.column_config.LinkColumn(
+        "O. TOP",
+        width=largura,
+        help="Abre o painel da Oficina Top para procurar esta O.S.",
+        display_text=r"dashboard#(.+)",
+    )
+
+
+def botao_oficina_top(chave: str, rotulo: str = "Abrir Oficina Top") -> None:
+    st.link_button(
+        rotulo,
+        URL_OFICINA_TOP,
+        type="primary",
+        icon=":material/open_in_new:",
+        help="Abre o painel da Oficina Top",
+        key=chave,
+    )
+
+
+def mostrar_aviso_os_top(chave: str = "aviso") -> None:
     numero = str(st.session_state.get("otop_numero") or "").strip()
-    if numero:
-        st.info(mensagem_os_top(numero), title=f"O. TOP {numero}")
+    if not numero:
+        return
+    st.info(mensagem_os_top(numero), title=f"O. TOP {numero}")
+    botao_oficina_top(f"link_otop_{chave}")
 
 
 def abrir_os_top(numero: str) -> None:
@@ -6414,14 +6494,22 @@ def _botoes_vinculo(rotulo: str, numeros: str, tipo: str, chave: str) -> None:
         return
     with st.container(horizontal=True, gap="small"):
         for numero in partes:
-            if st.button(numero, key=f"{chave}_{tipo}_{numero}", help=f"Abre {rotulo} {numero}"):
+            if tipo == "os_top":
+                st.link_button(
+                    numero,
+                    URL_OFICINA_TOP,
+                    icon=":material/open_in_new:",
+                    help=f"Abre o painel da Oficina Top para procurar a O.S. {numero}",
+                    key=f"{chave}_{tipo}_{numero}",
+                )
+            elif st.button(numero, key=f"{chave}_{tipo}_{numero}", help=f"Abre {rotulo} {numero}"):
                 abrir_codigo_vinculado(tipo, numero)
 
 
 def mostrar_codigos_vinculados(
     chave: str, pedido: str, orcamento: str, os_next: str, os_oficina: str, os_top: str = ""
 ) -> None:
-    mostrar_aviso_os_top()
+    mostrar_aviso_os_top(chave)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         _botoes_vinculo("Pedido de venda", pedido, "pedido", chave)
@@ -6517,9 +6605,14 @@ def mostrar_vinculo_pedido(codigo: str, detalhe: dict) -> None:
         ):
             abrir_os_oficina(os_oficina)
             st.rerun()
-        if os_top and st.button(f"Ver O.S. O. TOP {os_top}", key=f"vinc_os_top_{pedido}"):
-            abrir_os_top(os_top)
-            st.rerun()
+        if os_top:
+            st.link_button(
+                f"Ver O.S. O. TOP {os_top}",
+                URL_OFICINA_TOP,
+                icon=":material/open_in_new:",
+                help="Abre o painel da Oficina Top",
+                key=f"vinc_os_top_{pedido}",
+            )
         if orcamento and st.button(f"Ver orçamento {orcamento}", key=f"vinc_orc_ped_{pedido}"):
             ir_documento_cruz("orcamento", codigo_registrado("next_orcamento", "numero", orcamento))
 
@@ -6725,7 +6818,7 @@ def dialogo_notas_cliente() -> None:
     st.session_state.nx_os_next_notas = os_next
     st.session_state.nx_os_oficina_notas = os_oficina
     st.session_state.nx_os_top_notas = os_top
-    mostrar_aviso_os_top()
+    mostrar_aviso_os_top("notas")
     visivel = pd.DataFrame(
         {
             "Código": linhas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -6736,7 +6829,7 @@ def dialogo_notas_cliente() -> None:
             "Pedido": pedidos,
             "O.S. NeXT": os_next,
             "O.S. Oficina": os_oficina,
-            "O. TOP": os_top,
+            "O. TOP": links_os_top(os_top),
             "Baixar": ["Baixar"] * len(linhas),
         }
     )
@@ -6772,13 +6865,7 @@ def dialogo_notas_cliente() -> None:
                 on_click=_clique_os("nx_os_oficina_notas", "nx_click_os_oficina_notas", True),
                 key="nx_click_os_oficina_notas",
             ),
-            "O. TOP": st.column_config.ButtonColumn(
-                "O. TOP",
-                width="small",
-                help="A O.S. é do sistema Oficina Top. O clique mostra como procurá-la no novo sistema",
-                on_click=_clique_os_top("nx_os_top_notas", "nx_click_os_top_notas"),
-                key="nx_click_os_top_notas",
-            ),
+            "O. TOP": coluna_os_top(),
             "Baixar": st.column_config.ButtonColumn(
                 "Baixar",
                 type="primary",
@@ -6892,7 +6979,7 @@ def listar_next_abertas(
     if mostrar_vinculo:
         colunas["O.S. NeXT"] = os_next
         colunas["O.S. Oficina"] = os_oficina
-        colunas["O. TOP"] = os_top
+        colunas["O. TOP"] = links_os_top(os_top)
         baixar = colunas.pop("Baixar")
         colunas["Baixar"] = baixar
     if mostrar_dias:
@@ -6913,7 +7000,7 @@ def listar_next_abertas(
                 **{chave: colunas[chave] for chave in list(colunas) if chave not in {"Baixar", "O.S. NeXT", "O.S. Oficina", "O. TOP"}},
                 "O.S. NeXT": os_next,
                 "O.S. Oficina": os_oficina,
-                "O. TOP": os_top,
+                "O. TOP": links_os_top(os_top),
                 "Baixar": colunas["Baixar"],
             }
     visivel = pd.DataFrame(colunas)
@@ -6959,13 +7046,7 @@ def listar_next_abertas(
             on_click=_clique_os(f"{chave_ids}_os_oficina", f"{chave_ids}_os_oficina_click", True),
             key=f"{chave_ids}_os_oficina_click",
         )
-        config["O. TOP"] = st.column_config.ButtonColumn(
-            "O. TOP",
-            width="small",
-            help="A O.S. é do sistema Oficina Top. O clique mostra como procurá-la no novo sistema",
-            on_click=_clique_os_top(f"{chave_ids}_os_top", f"{chave_ids}_os_top_click"),
-            key=f"{chave_ids}_os_top_click",
-        )
+        config["O. TOP"] = coluna_os_top()
     if mostrar_dias:
         config["Dias vencidos"] = st.column_config.NumberColumn("Dias vencidos", format="%d", width="small")
     mostrar_planilha(
@@ -7033,7 +7114,7 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             "Pedido": pedidos,
             "O.S. NeXT": os_next,
             "O.S. Oficina": os_oficina,
-            "O. TOP": os_top,
+            "O. TOP": links_os_top(os_top),
             "Ver documento": colunas["Ver documento"],
             "Reabrir baixa": colunas["Reabrir baixa"],
         }
@@ -7079,13 +7160,7 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             on_click=_clique_os("nx_os_oficina_recentes", "nx_click_os_oficina_recentes", True),
             key="nx_click_os_oficina_recentes",
         )
-        config["O. TOP"] = st.column_config.ButtonColumn(
-            "O. TOP",
-            width="small",
-            help="A O.S. é do sistema Oficina Top. O clique mostra como procurá-la no novo sistema",
-            on_click=_clique_os_top("nx_os_top_recentes", "nx_click_os_top_recentes"),
-            key="nx_click_os_top_recentes",
-        )
+        config["O. TOP"] = coluna_os_top()
     mostrar_planilha(
         visivel,
         width="stretch",
@@ -7793,7 +7868,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 + "Pedido abre o pedido de venda. Baixar abre juros e multa."
                 + (
                     " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
-                    "O. TOP é a O.S. do sistema Oficina Top citada como OS # na observação."
+                    "O. TOP abre o painel da Oficina Top para procurar a O.S. citada como OS # na observação."
                     if tipo == "receber"
                     else ""
                 )
@@ -7821,7 +7896,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 "Pedido abre o pedido de venda."
                 + (
                     " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
-                    "O. TOP é a O.S. do sistema Oficina Top citada como OS # na observação."
+                    "O. TOP abre o painel da Oficina Top para procurar a O.S. citada como OS # na observação."
                     if tipo == "receber"
                     else ""
                 )
@@ -7981,6 +8056,7 @@ def dialogo_os_top() -> None:
     if not numero:
         return
     st.info(mensagem_os_top(numero), title=f"O. TOP {numero}")
+    botao_oficina_top("link_dialogo_os_top")
 
 
 def painel_contas_next() -> None:
@@ -8154,7 +8230,7 @@ def painel_contas_next() -> None:
                 "Ver documento abre a ficha do que já foi baixado."
                 + (
                     " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
-                    "O. TOP é a O.S. do sistema Oficina Top citada como OS # na observação. "
+                    "O. TOP abre o painel da Oficina Top para procurar a O.S. citada como OS # na observação. "
                 "Nas contas em aberto, o valor da dívida é o total das vendas menos o desconto e menos o pagamento parcial. "
                 "Quem não pagou nada fica com o líquido do pedido. A diferença lançada como juros foi retirada. "
                 "O botão de juros calcula esse acréscimo de novo. "
@@ -8165,9 +8241,12 @@ def painel_contas_next() -> None:
             )
         )
         tabela = visivel
+        if tipo == "receber" and "O. TOP" in visivel.columns:
+            tabela = visivel.copy()
+            tabela["O. TOP"] = links_os_top(tabela["O. TOP"].tolist())
         if tipo == "receber" and "Dias vencidos" in visivel.columns:
             tabela = pintar_dias_vencidos(
-                visivel,
+                tabela,
                 "Dias vencidos",
                 {"Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Documento"},
             )
@@ -8208,13 +8287,7 @@ def painel_contas_next() -> None:
                     on_click=_clique_os("nx_os_oficina_lancamento", "nx_click_os_oficina_lancamento", True),
                     key="nx_click_os_oficina_lancamento",
                 ),
-                "O. TOP": st.column_config.ButtonColumn(
-                    "O. TOP",
-                    width=52,
-                    help="A O.S. é do sistema Oficina Top. O clique mostra como procurá-la no novo sistema",
-                    on_click=_clique_os_top("nx_os_top_lancamento", "nx_click_os_top_lancamento"),
-                    key="nx_click_os_top_lancamento",
-                ),
+                "O. TOP": coluna_os_top(52),
                 "Documento": st.column_config.ButtonColumn(
                     "Documento",
                     type="primary",
@@ -10124,12 +10197,14 @@ def dialogo_documento_cruz() -> None:
                 ):
                     abrir_os_oficina(item["os_oficina"])
                     st.rerun()
-                if item.get("os_top") and st.button(
-                    f"Ver O.S. O. TOP {item['os_top']}",
-                    key=f"vinc_orc_ostop_{codigo}_{item['pedido']}",
-                ):
-                    abrir_os_top(item["os_top"])
-                    st.rerun()
+                if item.get("os_top"):
+                    st.link_button(
+                        f"Ver O.S. O. TOP {item['os_top']}",
+                        URL_OFICINA_TOP,
+                        icon=":material/open_in_new:",
+                        help="Abre o painel da Oficina Top",
+                        key=f"vinc_orc_ostop_{codigo}_{item['pedido']}",
+                    )
         return
     if tipo == "saida":
         garantir_nf_fiscal()
