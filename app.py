@@ -1328,6 +1328,7 @@ def render_os(numero: int) -> None:
             vinculos["os_next"],
             _juntar_codigos([str(numero), vinculos["os_oficina"]]),
         )
+        botao_financeiro_vinculado(str(numero), f"fin_ofi_{numero}")
     st.table(
         {
             "Cliente": texto_limpo(linha.nome_cliente),
@@ -3948,6 +3949,69 @@ def abrir_painel_pedidos() -> None:
     st.rerun()
 
 
+def _texto_planilha(valor) -> str | None:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None
+    texto = str(valor).strip()
+    return texto or None
+
+
+def lancar_item_pedido(marcacao: str) -> None:
+    codigo = str(st.session_state.get("repo_codigo") or "").strip()
+    descricao = str(st.session_state.get("repo_descricao") or "").strip()
+    if not codigo and not descricao:
+        st.session_state.repo_aviso = "Digite o código ou a descrição do produto."
+        return
+    with engine().begin() as conn:
+        atual = conn.execute(text("SELECT COALESCE(MAX(linha), 0) FROM painel_pedido_reposicao")).scalar()
+        conn.execute(
+            text(
+                """
+                INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao)
+                VALUES (:linha, :marcacao, :codigo, :descricao)
+                """
+            ),
+            {
+                "linha": int(atual or 0) + 1,
+                "marcacao": marcacao,
+                "codigo": codigo or None,
+                "descricao": descricao or None,
+            },
+        )
+    st.session_state.repo_codigo = ""
+    st.session_state.repo_descricao = ""
+    st.session_state.repo_aviso = ""
+    ler_pedidos_reposicao.clear()
+    st.rerun()
+
+
+def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> int:
+    antes = {}
+    for linha in original.itertuples(index=False):
+        antes[int(linha.linha)] = (_texto_planilha(linha.situacao), _texto_planilha(linha.loja))
+    alterados = []
+    for item in editado.itertuples(index=False):
+        numero = int(item.Linha)
+        novo = (_texto_planilha(item.Pedido), _texto_planilha(item.Fornecedor))
+        if antes.get(numero) != novo:
+            alterados.append({"linha": numero, "situacao": novo[0], "loja": novo[1]})
+    if not alterados:
+        return 0
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE painel_pedido_reposicao
+                SET situacao = :situacao, loja = :loja
+                WHERE linha = :linha
+                """
+            ),
+            alterados,
+        )
+    ler_pedidos_reposicao.clear()
+    return len(alterados)
+
+
 def tela_reposicao_estoque(interno: bool = False) -> None:
     st.title("Pedido/Reposição de estoque")
     st.caption("Os itens da planilha de pedidos. O botão Link copia o endereço deste painel.")
@@ -3961,6 +4025,17 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     elif acao2.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
         st.query_params.clear()
         st.rerun()
+    st.subheader("Lançar produto")
+    st.caption("Reposição grava RE e Vendido grava VE. Pedido e fornecedor ficam em branco para digitar na lista.")
+    campo_codigo, campo_descricao = st.columns(2)
+    campo_codigo.text_input("Código do produto", key="repo_codigo")
+    campo_descricao.text_input("Descrição", key="repo_descricao")
+    botao_re, botao_ve = st.columns(2)
+    botao_re.button("Reposição", type="primary", width="stretch", key="repo_re", on_click=lancar_item_pedido, args=("RE",))
+    botao_ve.button("Vendido", width="stretch", key="repo_ve", on_click=lancar_item_pedido, args=("VE",))
+    aviso = st.session_state.get("repo_aviso") or ""
+    if aviso:
+        st.warning(aviso)
     try:
         garantir_pedido_reposicao()
         frame = ler_pedidos_reposicao()
@@ -3968,11 +4043,11 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         st.info("A planilha de pedidos ainda não está disponível neste painel.")
         return
     if frame.empty:
-        st.info("A planilha de pedidos ainda não tem itens.")
+        st.info("Nenhum item lançado ainda.")
         return
     termo = st.text_input(
         "Pesquisar",
-        placeholder="Código, descrição, marca ou loja",
+        placeholder="Código, descrição, marca ou fornecedor",
         key="busca_pedido_reposicao",
     ).strip()
     lojas = {}
@@ -3980,7 +4055,11 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         texto = str(nome).strip()
         if texto:
             lojas.setdefault(texto.casefold(), texto)
-    escolha = st.selectbox("Loja", ["Todas", *[lojas[chave] for chave in sorted(lojas)]], key="loja_pedido_reposicao")
+    escolha = st.selectbox(
+        "Fornecedor",
+        ["Todas", *[lojas[chave] for chave in sorted(lojas)]],
+        key="loja_pedido_reposicao",
+    )
     visivel = frame
     if termo:
         alvo = termo.casefold()
@@ -3991,13 +4070,14 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         visivel = visivel[mascara]
     if escolha != "Todas":
         visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
-    st.caption(f"{inteiro(len(visivel))} itens. As últimas linhas da planilha aparecem primeiro.")
+    st.caption(f"{inteiro(len(visivel))} itens. O lançamento novo entra na primeira linha.")
     grade = visivel.rename(
         columns={
+            "linha": "Linha",
             "quantidade": "Qtde",
             "marcacao": "RE/VE",
-            "situacao": "Situação",
-            "loja": "Loja",
+            "situacao": "Pedido",
+            "loja": "Fornecedor",
             "codigo": "Código",
             "descricao": "Descrição",
             "preco": "Preço",
@@ -4009,21 +4089,53 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
             "preco_4": "Preço 4",
             "marca_4": "Marca 4",
         }
-    ).drop(columns=["linha"])
-    st.dataframe(
+    )
+    grade = grade[
+        [
+            "Código",
+            "Descrição",
+            "RE/VE",
+            "Pedido",
+            "Fornecedor",
+            "Qtde",
+            "Preço",
+            "Marca",
+            "Preço 2",
+            "Marca 2",
+            "Preço 3",
+            "Marca 3",
+            "Preço 4",
+            "Marca 4",
+            "Linha",
+        ]
+    ]
+    editado = st.data_editor(
         grade,
         width="stretch",
         hide_index=True,
         height=640,
+        num_rows="fixed",
+        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Fornecedor"}],
         column_config={
+            "Linha": st.column_config.NumberColumn("Linha", width="small"),
             "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f"),
+            "Pedido": st.column_config.TextColumn("Pedido"),
+            "Fornecedor": st.column_config.TextColumn("Fornecedor"),
             "Preço": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
             "Preço 2": st.column_config.NumberColumn("Preço 2", format="R$ %.2f"),
             "Preço 3": st.column_config.NumberColumn("Preço 3", format="R$ %.2f"),
             "Preço 4": st.column_config.NumberColumn("Preço 4", format="R$ %.2f"),
         },
+        key="editor_pedido_reposicao",
         alt="Itens da planilha de pedidos",
     )
+    if st.button("Gravar pedido e fornecedor", type="primary", key="gravar_pedido_fornecedor"):
+        gravados = gravar_pedido_fornecedor(editado, visivel)
+        if gravados:
+            st.session_state.repo_aviso = ""
+            st.rerun()
+        else:
+            st.info("Nenhuma alteração de pedido ou fornecedor para gravar.")
 
 
 def tela_acesso() -> None:
@@ -4775,16 +4887,121 @@ def lateral_modulo(usuario: dict, texto: str, legenda: str | None = None) -> Non
             st.caption(legenda)
 
 
-def clausula_pesquisa_next(termo: str, params: list) -> str:
+_PEDIDO_NO_HISTORICO = (
+    "ltrim(substring(COALESCE(next_lancamento.historico, '') "
+    "from '[Pp][Ee][Dd][Ii][Dd][Oo][^0-9]*([0-9]+)'), '0')"
+)
+
+
+def _acumular_pedidos(destino: list[str], frame: pd.DataFrame) -> None:
+    if frame is None or frame.empty:
+        return
+    for valor in frame.iloc[:, 0].tolist():
+        texto = str(valor or "").strip()
+        if texto and texto not in destino and len(destino) < 400:
+            destino.append(texto)
+
+
+def pedidos_do_termo(termo: str) -> list[str]:
+    pedidos: list[str] = []
+    for item in termos_busca(termo):
+        if item.isdigit():
+            numero = str(int(item))
+            _acumular_pedidos(
+                pedidos,
+                query(
+                    """
+                    SELECT DISTINCT ltrim(trim(codvenda), '0')
+                    FROM next_pedido_detalhe
+                    WHERE ltrim(trim(codvenda), '0') = ?
+                       OR ltrim(trim(COALESCE(codorcamento, '')), '0') = ?
+                       OR ltrim(trim(COALESCE(codos, '')), '0') = ?
+                       OR ltrim(trim(COALESCE(os_oficina, '')), '0') = ?
+                    """,
+                    (numero, numero, numero, numero),
+                ),
+            )
+        if item.isdigit() and len(item) < 4:
+            continue
+        marca = like(item)
+        _acumular_pedidos(
+            pedidos,
+            query(
+                "SELECT DISTINCT ltrim(trim(codvenda), '0') FROM next_pedido_detalhe WHERE "
+                + comparar_busca("observacoes")
+                + " OR "
+                + comparar_busca("nota_fiscal"),
+                (marca, marca),
+            ),
+        )
+        _acumular_pedidos(
+            pedidos,
+            query(
+                """
+                SELECT DISTINCT ltrim(trim(d.codvenda), '0')
+                FROM next_pedido_detalhe d
+                JOIN next_os o ON ltrim(trim(o.codigo), '0') = ltrim(trim(d.codos), '0')
+                WHERE """
+                + " OR ".join(
+                    comparar_busca(campo)
+                    for campo in (
+                        "o.veiculo",
+                        "o.chassi",
+                        "o.observacoes",
+                        "o.problema",
+                        "o.entrada",
+                    )
+                ),
+                (marca, marca, marca, marca, marca),
+            ),
+        )
+        _acumular_pedidos(
+            pedidos,
+            query(
+                """
+                SELECT DISTINCT ltrim(trim(d.codvenda), '0')
+                FROM next_pedido_detalhe d
+                JOIN oficina_os f ON ltrim(CAST(f.id_os AS TEXT), '0') = ltrim(trim(d.os_oficina), '0')
+                WHERE """
+                + " OR ".join(
+                    comparar_busca(campo)
+                    for campo in ("f.placa", "f.placa_veiculo", "f.obs", "f.nome_cliente")
+                ),
+                (marca, marca, marca, marca),
+            ),
+        )
+    return pedidos
+
+
+def clausula_documento_financeiro(termo: str, params: list) -> str:
     termos = termos_busca(termo)
     if not termos:
         return ""
+    pedidos = pedidos_do_termo(termo)
     partes = []
-    for campo in ("codigo", "duplicata", "nome", "historico", "obs_conta"):
-        for item in termos:
+    for item in termos:
+        for campo in ("codigo", "duplicata", "nome", "historico", "obs_conta"):
             partes.append(comparar_busca(campo))
             params.append(like(item))
-    return " AND (" + " OR ".join(partes) + ")"
+        if item.isdigit():
+            numero = str(int(item))
+            partes.append(f"{_PEDIDO_NO_HISTORICO} = ?")
+            params.append(numero)
+            partes.append("ltrim(COALESCE(codigo, ''), '0') = ?")
+            params.append(numero)
+            partes.append("ltrim(split_part(COALESCE(duplicata, ''), '/', 1), '0') = ?")
+            params.append(numero)
+    if pedidos:
+        partes.append(f"{_PEDIDO_NO_HISTORICO} IN ({', '.join('?' for _ in pedidos)})")
+        params.extend(pedidos)
+    return "(" + " OR ".join(partes) + ")"
+
+
+def clausula_pesquisa_next(termo: str, params: list) -> str:
+    bloco = clausula_documento_financeiro(termo, params)
+    if not bloco:
+        return ""
+    return " AND " + bloco
 
 
 def limpar_pesquisa_next(tipo: str) -> None:
@@ -4796,9 +5013,9 @@ def pesquisa_next(tipo: str) -> str:
     with st.form(f"pesquisa_next_{tipo}", border=True):
         campo, acao = st.columns([4, 1], vertical_alignment="bottom")
         termo_digitado = campo.text_input(
-            "Pesquisar por código, duplicata, nome ou histórico",
+            "Pesquisar por pedido, O.S., orçamento, placa, observação, cliente ou histórico",
             key=f"next_termo_campo_{tipo}",
-            placeholder="Código, duplicata, nome ou histórico",
+            placeholder="Pedido, O.S., orçamento, placa, observação ou cliente",
             persist_state="session",
         )
         pesquisou = acao.form_submit_button("Pesquisar", type="primary", width="stretch")
@@ -6460,17 +6677,19 @@ def _where_lancamento(tipo: str) -> tuple[str, list]:
     )
     pessoa = str(st.session_state.get("nx_pessoa") or "").strip()
     if pessoa:
-        campo = "historico" if st.session_state.get("nx_busca_hist") else "nome"
-        where += " AND " + comparar_busca(campo)
-        params.append(like(pessoa))
+        if st.session_state.get("nx_busca_hist"):
+            where += " AND (" + comparar_busca("historico")
+            params.append(like(pessoa))
+            where += " OR " + clausula_documento_financeiro(pessoa, params) + ")"
+        else:
+            where += " AND " + clausula_documento_financeiro(pessoa, params)
     duplicata = str(st.session_state.get("nx_duplicata") or "").strip()
     if duplicata:
         where += " AND " + comparar_busca("duplicata")
         params.append(like(duplicata))
     documento = str(st.session_state.get("nx_documento") or "").strip()
     if documento:
-        where += " AND " + comparar_busca("codigo")
-        params.append(like(documento))
+        where += " AND " + clausula_documento_financeiro(documento, params)
     return where, params
 
 
@@ -6794,7 +7013,11 @@ def painel_contas_next() -> None:
             e3.selectbox("Espécie", ["--> Todos <--"], key="nx_especie")
             p1, p2 = st.columns([3, 1], vertical_alignment="bottom")
             rotulo_pessoa = "Histórico" if st.session_state.get("nx_busca_hist") else "Cliente"
-            p1.text_input(rotulo_pessoa, key="nx_pessoa")
+            p1.text_input(
+                rotulo_pessoa,
+                key="nx_pessoa",
+                help="Pedido, O.S., orçamento, placa, observação, cliente ou histórico",
+            )
             if p2.button("Histórico", key="nx_alternar_hist", width="stretch"):
                 st.session_state.nx_busca_hist = not st.session_state.nx_busca_hist
                 st.rerun()
@@ -6802,7 +7025,11 @@ def painel_contas_next() -> None:
             b1.selectbox("Plano de contas", ["--> Todos <--"], key="nx_plano")
             b2.selectbox("Banco/agência/conta", ["--> Todos <--"], key="nx_banco")
             b3.selectbox("Frequência do pagamento", ["--> Todos <--"], key="nx_freq")
-            st.text_input("Documento", key="nx_documento", help="Código do lançamento")
+            st.text_input(
+                "Documento",
+                key="nx_documento",
+                help="Código do lançamento, pedido, O.S., orçamento, placa ou observação",
+            )
     acao1, acao2, acao3, acao4 = st.columns(4)
     if acao1.button("Busca", type="primary", width="stretch"):
         st.session_state.nx_busca_feita = True
@@ -6812,8 +7039,9 @@ def painel_contas_next() -> None:
         st.markdown(
             "Todos lista o movimento inteiro. Vencidas, em até N dias, a vencer e em aberto "
             "olham o vencimento das contas que ainda não foram quitadas. Efetivadas são as quitadas. "
-            "Efetivadas no dia usa a data da baixa. Cliente procura o nome; Histórico passa o mesmo "
-            "texto para o histórico do lançamento. Duplicata e documento procuram cada um o seu campo. "
+            "Efetivadas no dia usa a data da baixa. Cliente, documento e a pesquisa de baixo encontram "
+            "o pedido, a O.S., o orçamento, a placa, a observação, o cliente e o histórico. "
+            "Duplicata procura a duplicata. "
             "Período de vencimento e período de baixa restringem as datas. "
             "Data de emissão, plano de contas, espécie, banco e frequência não vieram na planilha, "
             "então permanecem em todos."
@@ -6976,6 +7204,47 @@ def painel_contas_next() -> None:
         dialogo_documento_cruz()
     elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
+
+
+def abrir_financeiro_vinculado(termo: str) -> None:
+    st.session_state.cruz_doc_id = None
+    st.session_state.nx_os_da_conta = False
+    st.session_state.nx_pedido_da_conta = False
+    st.session_state.next_baixa_id = None
+    st.session_state.fin_os_aberta = None
+    st.session_state.fin_os_perguntar = None
+    st.session_state.modulo = "pv"
+    st.session_state.tela_next = "receber"
+    st.session_state.menu_next_aberto = "Financeiro"
+    st.session_state.tela_next_rotulo = "Financeiro · Contas a receber"
+    st.session_state.next_fin_lista = "receber"
+    st.session_state.nx_visualizar = "Contas a receber"
+    st.session_state.nx_pessoa = str(termo or "").strip()
+    st.session_state.nx_busca_hist = False
+    st.session_state.nx_duplicata = ""
+    st.session_state.nx_documento = ""
+    st.session_state.nx_venc_de = None
+    st.session_state.nx_venc_ate = None
+    st.session_state.nx_baixa_de = None
+    st.session_state.nx_baixa_ate = None
+    st.session_state.nx_emis_de = None
+    st.session_state.nx_emis_ate = None
+    st.session_state.nx_opcao_receber = "--> Todos <--"
+    st.session_state.nx_busca_feita = True
+    st.session_state.nx_busca_tipo = "receber"
+
+
+def botao_financeiro_vinculado(termo: str, chave: str) -> None:
+    texto = str(termo or "").strip()
+    if not texto:
+        return
+    st.button(
+        "Financeiro da O.S./Pedido",
+        key=chave,
+        on_click=abrir_financeiro_vinculado,
+        args=(texto,),
+        help="Abre as contas a receber deste documento para consulta e baixa",
+    )
 
 
 def ir_contas_receber() -> None:
@@ -8140,6 +8409,7 @@ def ficha_pedido(codigo: str) -> None:
             st.caption(_texto_detalhe(detalhe.get("observacoes")))
         if detalhe.get("valor_total") is not None:
             st.metric("Total do pedido", brl(detalhe.get("valor_total")))
+        botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_vazio_{chave}")
         st.info("Este pedido não tem a lista de peças na carga de vendas.")
         return
     cab = pecas.iloc[0]
@@ -8216,6 +8486,7 @@ def ficha_pedido(codigo: str) -> None:
             os_next,
             os_oficina,
         )
+        botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_{chave}")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             _campo_pedido("Data emissão", data_emissao, f"ped_{chave}_emissao", campo="emissao")
@@ -8542,6 +8813,7 @@ def ficha_os(codigo: str) -> None:
             _juntar_codigos([codigo, vinculos["os_next"]]),
             vinculos["os_oficina"],
         )
+        botao_financeiro_vinculado(_chave_numero(codigo), f"fin_os_{chave}")
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             _campo_pedido("O.S. NeXT", linha["codigo"], f"os_{chave}_num", travado=True, campo="numero")
