@@ -1555,6 +1555,27 @@ def abrir_baixa_pedido(conta_id: int, quitado: bool) -> None:
     st.rerun()
 
 
+def botao_baixa_pedido(codigo: str, chave: str) -> None:
+    numero = _chave_numero(codigo)
+    valor = valor_documento_pedido(numero)
+    conta = conta_baixa_pedido(numero, valor)
+    if not conta:
+        st.caption(f"Sem conta de baixa do pedido {numero}.")
+        return
+    quitado = str(conta["quitado"] or "").strip().casefold() == "sim"
+    if st.button(f"Baixa do pedido {numero}", type="primary", key=chave):
+        abrir_baixa_pedido(int(conta["id"]), quitado)
+
+
+def mostrar_baixas_pedidos(numeros: str, chave: str) -> None:
+    partes = [parte.strip() for parte in (numeros or "").split(",") if parte.strip() and parte.strip() != "—"]
+    if not partes:
+        st.caption("Sem pedido vinculado para abrir a baixa.")
+        return
+    for pedido in partes:
+        botao_baixa_pedido(pedido, f"{chave}_{pedido}")
+
+
 def mostrar_baixa_documentos_os(numero: int) -> None:
     itens = pedidos_ligados("os_oficina", str(numero))
     pedidos = []
@@ -1571,7 +1592,8 @@ def mostrar_baixa_documentos_os(numero: int) -> None:
         st.metric(f"O.S. {numero}", brl(valor_os) if valor_os is not None else "—")
         if conta_os and colunas[0].button("Baixa da O.S.", type="primary", key=f"baixa_os_{numero}"):
             st.session_state.aba = ABA_FIN
-            abrir_baixa(int(conta_os["id"]))
+            quitado_os = str(conta_os["quitado"] or "").strip().casefold() == "sim"
+            abrir_baixa(int(conta_os["id"]), ver=quitado_os)
             st.rerun()
         elif not conta_os:
             st.caption("Sem conta de baixa desta O.S.")
@@ -2237,17 +2259,19 @@ def abrir_os_da_conta(numero: int, origem: str) -> None:
     st.session_state.fin_origem = origem
 
 
-def abrir_baixa(conta_id: int, reabrir: bool = False) -> None:
+def abrir_baixa(conta_id: int, reabrir: bool = False, ver: bool = False) -> None:
     st.session_state.fin_os_perguntar = None
     st.session_state.fin_os_aberta = None
     st.session_state.fin_baixa_id = int(conta_id)
     st.session_state.fin_baixa_reabrir = bool(reabrir)
+    st.session_state.fin_baixa_ver = bool(ver) and not reabrir
     st.session_state.fin_baixa_init = None
 
 
 def fechar_baixa() -> None:
     st.session_state.fin_baixa_id = None
     st.session_state.fin_baixa_reabrir = False
+    st.session_state.fin_baixa_ver = False
 
 
 def _sync_data_pagamento(conta_id: int) -> None:
@@ -2484,6 +2508,78 @@ def _dados_documento(linha: pd.Series, juros: float, multa: float, pago: float, 
     }
 
 
+def _dados_salvos(linha: pd.Series) -> dict:
+    juros, multa, _ = _encargos_salvos(linha)
+    quando = data_iso(linha["dt_pagamento"])
+    obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    return _dados_documento(linha, juros, multa, valor_banco(linha["valor_pago"]), quando, obs)
+
+
+def fragmento_recibo(dados: dict) -> str:
+    cnpj = html.escape(documento_empresa(CNPJ_NUMERO))
+    return f"""
+    <div class="doc-baixa">
+      <style>
+        .doc-baixa {{ font-family: Georgia, "Times New Roman", serif; color: #1c2430; background: #fff;
+                      border: 1px solid #c5d7ce; border-radius: 10px; padding: 18px 20px; }}
+        .doc-baixa h2 {{ font-family: Arial, sans-serif; font-size: 18px; color: #145c45; margin: 8px 0; }}
+        .doc-baixa .empresa {{ margin: 0; font-family: Arial, sans-serif; font-size: 12px; color: #3d4a42; }}
+        .doc-baixa table {{ width: 100%; border-collapse: collapse; margin: 12px 0; }}
+        .doc-baixa th, .doc-baixa td {{ border: 1px solid #c5d7ce; padding: 7px 8px; font-size: 14px;
+                                         text-align: left; vertical-align: top; }}
+        .doc-baixa th {{ width: 34%; background: #f4fbf7; font-family: Arial, sans-serif; }}
+        .doc-baixa .texto {{ font-size: 14px; line-height: 1.45; text-align: justify; }}
+        .doc-baixa .carimbo {{ margin-top: 12px; font-family: Arial, sans-serif; font-weight: 700; color: #145c45; }}
+      </style>
+      <p class="empresa">{html.escape(TITULO.upper())}<br>CNPJ {cnpj}<br>{html.escape(ENDERECO_EMPRESA)}</p>
+      <h2>RECIBO DE QUITAÇÃO</h2>
+      <p class="texto">
+        Recebemos de <strong>{html.escape(dados["cliente"])}</strong> a importância de
+        <strong>{html.escape(dados["valor_pago"])}</strong>
+        ({html.escape(dados["extenso"])}),
+        referente a {html.escape(dados["descricao"])}, OS nº {html.escape(dados["os"])},
+        dando plena, rasa e irrevogável quitação do débito abaixo.
+      </p>
+      <table>
+        {_linha_doc("Recibo nº", dados["numero"])}
+        {_linha_doc("Cliente", dados["cliente"])}
+        {_linha_doc("Nº OS", dados["os"])}
+        {_linha_doc("Descrição", dados["descricao"])}
+        {_linha_doc("Parcela", dados["parcela"])}
+        {_linha_doc("Vencimento", dados["vencimento"])}
+        {_linha_doc("Valor da dívida", dados["divida"])}
+        {_linha_doc("Juros", dados["juros"])}
+        {_linha_doc("Multa", dados["multa"])}
+        {_linha_doc("Valor pago", dados["valor_pago"])}
+        {_linha_doc("Data do pagamento", dados["pagamento"])}
+        {_linha_doc("Obs", dados["obs"])}
+      </table>
+      <p class="carimbo">QUITADO</p>
+      <p class="texto">{html.escape(ENDERECO_EMPRESA)}, {html.escape(dados["pagamento"])}.</p>
+    </div>
+    """
+
+
+def mostrar_documento_baixa(linha: pd.Series, chave: str) -> None:
+    dados = _dados_salvos(linha)
+    st.html(fragmento_recibo(dados))
+    juros, multa, _ = _encargos_salvos(linha)
+    pago = valor_banco(linha["valor_pago"])
+    quando = data_iso(linha["dt_pagamento"])
+    obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    devido = round(valor_banco(linha["valor"]) + juros + multa, 2)
+    restante = round(max(0.0, devido - pago), 2)
+    dados_nota = dict(dados)
+    valor_nota = restante if restante > 0 else devido
+    dados_nota["valor"] = brl(valor_nota)
+    dados_nota["extenso"] = reais_por_extenso(valor_nota)
+    i1, i2 = st.columns(2)
+    if i1.button("Imprimir recibo quitado", width="stretch", key=f"{chave}_recibo"):
+        disparar_impressao(html_recibo(dados))
+    if i2.button("Imprimir nota promissória", width="stretch", key=f"{chave}_nota"):
+        disparar_impressao(html_promissoria(dados_nota))
+
+
 def _ficha_conta(linha: pd.Series, dias: int | None) -> None:
     numero = numero_os(linha["os"])
     pares = [
@@ -2583,10 +2679,21 @@ def dialogo_baixa() -> None:
         st.warning("Esta conta não está mais no financeiro.")
         return
     reabrir = bool(st.session_state.get("fin_baixa_reabrir"))
+    ver = bool(st.session_state.get("fin_baixa_ver")) and not reabrir
     _preparar_form_baixa(int(conta_id), linha, reabrir)
+    dias = dias_em_atraso(linha["vencimento"], "Nao")
+    if ver:
+        st.subheader("Documento da baixa")
+        _ficha_conta(linha, dias)
+        mostrar_documento_baixa(linha, f"bx_doc_{conta_id}")
+        if st.button("Reabrir baixa", type="primary", width="stretch", key=f"bx_reabrir_doc_{conta_id}"):
+            st.session_state.fin_baixa_reabrir = True
+            st.session_state.fin_baixa_ver = False
+            st.session_state.fin_baixa_init = None
+            st.rerun()
+        return
     if reabrir:
         st.subheader("Reabrir baixa")
-    dias = dias_em_atraso(linha["vencimento"], "Nao")
     _ficha_conta(linha, dias)
     liberado = indagar_edicao("baixa_oficina", str(conta_id), "esta baixa")
     saldo = round(max(0.0, valor_banco(linha["valor"]) - valor_banco(linha["valor_pago"])), 2)
@@ -7011,8 +7118,9 @@ def dialogo_baixa_next() -> None:
     ver = bool(st.session_state.get("next_baixa_ver")) and not reabrir
     dias = dias_em_atraso(linha["vencimento"], "Nao")
     if ver:
-        st.subheader("Documento baixado")
+        st.subheader("Documento da baixa")
         _ficha_next(linha, dias, mostrar_baixa=True)
+        mostrar_documento_baixa(linha, f"nx_doc_{conta_id}")
         if st.button("Reabrir baixa", type="primary", width="stretch", key=f"nx_reabrir_doc_{conta_id}"):
             st.session_state.next_baixa_reabrir = True
             st.session_state.next_baixa_ver = False
@@ -9118,6 +9226,7 @@ def ficha_pedido(codigo: str) -> None:
         if detalhe.get("valor_total") is not None:
             st.metric("Total do pedido", brl(detalhe.get("valor_total")))
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_vazio_{chave}")
+        botao_baixa_pedido(codigo, f"baixa_ped_vazio_{chave}")
         st.info("Este pedido não tem a lista de peças na carga de vendas.")
         return
     cab = pecas.iloc[0]
@@ -9196,6 +9305,7 @@ def ficha_pedido(codigo: str) -> None:
             texto_os_top(observacao),
         )
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_{chave}")
+        botao_baixa_pedido(codigo, f"baixa_ped_{chave}")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             _campo_pedido("Data emissão", data_emissao, f"ped_{chave}_emissao", campo="emissao")
@@ -9534,6 +9644,7 @@ def ficha_os(codigo: str) -> None:
             juntar_numeros(texto_os_top(_texto_detalhe(linha["observacoes"])), vinculos.get("os_top")),
         )
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_os_{chave}")
+        mostrar_baixas_pedidos(vinculos["pedido"], f"baixa_osnext_{chave}")
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             _campo_pedido("O.S. NeXT", linha["codigo"], f"os_{chave}_num", travado=True, campo="numero")
@@ -9659,6 +9770,7 @@ def dialogo_documento_cruz() -> None:
                 vinculos["os_oficina"],
                 vinculos.get("os_top") or "",
             )
+            mostrar_baixas_pedidos(vinculos["pedido"], f"baixa_orc_{_chave_numero(codigo)}")
         st.caption(
             f"{texto_limpo(cab.iat[0, 2]) or 'Sem cliente'} · {data_br(cab.iat[0, 1]) or 'sem data'} · "
             f"{texto_limpo(cab.iat[0, 3]) or 'sem status'} · {texto_limpo(cab.iat[0, 4]) or 'sem condição'}"
