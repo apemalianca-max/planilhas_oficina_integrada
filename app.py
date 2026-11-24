@@ -4012,6 +4012,26 @@ def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> i
     return len(alterados)
 
 
+def excluir_item_pedido() -> None:
+    click = st.session_state.get("repo_click_excluir")
+    linhas = list(st.session_state.get("repo_linhas_excluir") or [])
+    if click is None:
+        return
+    try:
+        indice = click.row
+    except AttributeError:
+        indice = click["row"]
+    if not isinstance(indice, int) or not 0 <= indice < len(linhas):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text("DELETE FROM painel_pedido_reposicao WHERE linha = :linha"),
+            {"linha": int(linhas[indice])},
+        )
+    ler_pedidos_reposicao.clear()
+    st.rerun()
+
+
 def tela_reposicao_estoque(interno: bool = False) -> None:
     st.title("Pedido/Reposição de estoque")
     st.caption("Os itens da planilha de pedidos. O botão Link copia o endereço deste painel.")
@@ -4032,7 +4052,14 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     campo_descricao.text_input("Descrição", key="repo_descricao")
     botao_re, botao_ve = st.columns(2)
     botao_re.button("Reposição", type="primary", width="stretch", key="repo_re", on_click=lancar_item_pedido, args=("RE",))
-    botao_ve.button("Vendido", width="stretch", key="repo_ve", on_click=lancar_item_pedido, args=("VE",))
+    botao_ve.button(
+        "Vendido",
+        type="primary",
+        width="stretch",
+        key="repo_ve",
+        on_click=lancar_item_pedido,
+        args=("VE",),
+    )
     aviso = st.session_state.get("repo_aviso") or ""
     if aviso:
         st.warning(aviso)
@@ -4071,6 +4098,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
     if escolha != "Todas":
         visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
     st.caption(f"{inteiro(len(visivel))} itens. O lançamento novo entra na primeira linha.")
+    st.session_state.repo_linhas_excluir = [int(valor) for valor in visivel["linha"].tolist()]
     grade = visivel.rename(
         columns={
             "linha": "Linha",
@@ -4090,8 +4118,10 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
             "marca_4": "Marca 4",
         }
     )
+    grade.insert(0, "Excluir", "Excluir")
     grade = grade[
         [
+            "Excluir",
             "Código",
             "Descrição",
             "RE/VE",
@@ -4115,8 +4145,16 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         hide_index=True,
         height=640,
         num_rows="fixed",
-        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Fornecedor"}],
+        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Fornecedor", "Excluir"}],
         column_config={
+            "Excluir": st.column_config.ButtonColumn(
+                "Excluir",
+                width="small",
+                pinned=True,
+                help="Tira este produto da listagem",
+                on_click=excluir_item_pedido,
+                key="repo_click_excluir",
+            ),
             "Linha": st.column_config.NumberColumn("Linha", width="small"),
             "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f"),
             "Pedido": st.column_config.TextColumn("Pedido"),
