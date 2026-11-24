@@ -3888,12 +3888,22 @@ def botao_copiar_link(url: str, chave: str, cor: str = "#16324f") -> None:
 def atalho_reposicao_login() -> None:
     st.divider()
     st.subheader("Pedido/Reposição de estoque")
-    st.caption("Sem senha. Copie o link para abrir ou compartilhar este painel.")
-    botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
+    st.caption("Sem senha. O botão da esquerda abre o painel. O outro copia o link para compartilhar.")
+    abrir, copiar = st.columns(2, vertical_alignment="center")
+    if abrir.button(
+        "Pedido/Reposição de estoque",
+        type="primary",
+        width="stretch",
+        key="abrir_reposicao_login",
+    ):
+        st.query_params["painel"] = "reposicao"
+        st.rerun()
+    with copiar:
+        botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
 
 
 def garantir_pedido_reposicao() -> None:
-    if st.session_state.get("pedido_reposicao_ok"):
+    if st.session_state.get("pedido_reposicao_ok") and st.session_state.get("pedido_reposicao_observacao_ok"):
         return
     with engine().begin() as conn:
         conn.execute(
@@ -3923,6 +3933,7 @@ def garantir_pedido_reposicao() -> None:
             text("ALTER TABLE painel_pedido_reposicao ADD COLUMN IF NOT EXISTS observacao text")
         )
     st.session_state.pedido_reposicao_ok = True
+    st.session_state.pedido_reposicao_observacao_ok = True
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -3957,36 +3968,63 @@ def descricao_com_observacao(descricao, observacao) -> str:
     return base
 
 
-def lancar_item_pedido(marcacao: str) -> None:
-    codigo = str(st.session_state.get("repo_codigo") or "").strip()
-    descricao = str(st.session_state.get("repo_descricao") or "").strip()
-    observacao = str(st.session_state.get("repo_observacao") or "").strip()
+def rotulo_marcacao(valor) -> str:
+    texto = (_texto_planilha(valor) or "").casefold()
+    if texto == "ve":
+        return "Vendido"
+    if texto == "re":
+        return "Reposição"
+    return _texto_planilha(valor) or ""
+
+
+def pintar_vendido(frame: pd.DataFrame):
+    def cor(linha):
+        vendido = str(linha.get("RE/VE") or "").casefold() == "vendido"
+        tinta = "background-color: #0c6b4d; color: #f4fbf7; font-weight: 700" if vendido else ""
+        return ["" if coluna in {"Pedido", "Fornecedor", "Excluir"} else tinta for coluna in linha.index]
+
+    return frame.style.apply(cor, axis=1)
+
+
+def _atualizar_grade_pedidos() -> None:
+    st.session_state.repo_grade_versao = int(st.session_state.get("repo_grade_versao") or 0) + 1
+
+
+def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: str) -> None:
+    codigo = str(codigo or "").strip()
+    descricao = str(descricao or "").strip()
+    observacao = str(observacao or "").strip()
     if not codigo and not descricao:
+        st.session_state.repo_ok = ""
         st.session_state.repo_aviso = "Digite o código ou a descrição do produto."
         return
-    with engine().begin() as conn:
-        atual = conn.execute(text("SELECT COALESCE(MAX(linha), 0) FROM painel_pedido_reposicao")).scalar()
-        conn.execute(
-            text(
-                """
-                INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao, observacao)
-                VALUES (:linha, :marcacao, :codigo, :descricao, :observacao)
-                """
-            ),
-            {
-                "linha": int(atual or 0) + 1,
-                "marcacao": marcacao,
-                "codigo": codigo or None,
-                "descricao": descricao or None,
-                "observacao": observacao or None,
-            },
-        )
-    st.session_state.repo_codigo = ""
-    st.session_state.repo_descricao = ""
-    st.session_state.repo_observacao = ""
-    st.session_state.repo_aviso = ""
+    try:
+        garantir_pedido_reposicao()
+        with engine().begin() as conn:
+            atual = conn.execute(text("SELECT COALESCE(MAX(linha), 0) FROM painel_pedido_reposicao")).scalar()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao, observacao)
+                    VALUES (:linha, :marcacao, :codigo, :descricao, :observacao)
+                    """
+                ),
+                {
+                    "linha": int(atual or 0) + 1,
+                    "marcacao": marcacao,
+                    "codigo": codigo or None,
+                    "descricao": descricao or None,
+                    "observacao": observacao or None,
+                },
+            )
+    except Exception:
+        st.session_state.repo_ok = ""
+        st.session_state.repo_aviso = "Não foi possível lançar este produto. Clique de novo em Reposição ou Vendido."
+        return
     ler_pedidos_reposicao.clear()
-    st.rerun()
+    _atualizar_grade_pedidos()
+    st.session_state.repo_aviso = ""
+    st.session_state.repo_ok = f"Lançado: {descricao_com_observacao(descricao, observacao)} ({rotulo_marcacao(marcacao)})"
 
 
 def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> int:
@@ -4013,6 +4051,7 @@ def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> i
             alterados,
         )
     ler_pedidos_reposicao.clear()
+    _atualizar_grade_pedidos()
     return len(alterados)
 
 
@@ -4033,6 +4072,7 @@ def excluir_item_pedido() -> None:
             {"linha": int(linhas[indice])},
         )
     ler_pedidos_reposicao.clear()
+    _atualizar_grade_pedidos()
     st.rerun()
 
 
@@ -4050,24 +4090,23 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         st.query_params.clear()
         st.rerun()
     st.subheader("Lançar produto")
-    st.caption("Reposição grava RE e Vendido grava VE. Pedido e fornecedor ficam em branco para digitar na lista.")
-    campo_codigo, campo_descricao = st.columns(2)
-    campo_codigo.text_input("Código do produto", key="repo_codigo")
-    campo_descricao.text_input("Descrição", key="repo_descricao")
-    campo_descricao.text_input("Observação", key="repo_observacao")
-    botao_re, botao_ve = st.columns(2)
-    botao_re.button("Reposição", type="primary", width="stretch", key="repo_re", on_click=lancar_item_pedido, args=("RE",))
-    botao_ve.button(
-        "Vendido",
-        type="primary",
-        width="stretch",
-        key="repo_ve",
-        on_click=lancar_item_pedido,
-        args=("VE",),
-    )
-    aviso = st.session_state.get("repo_aviso") or ""
+    st.caption("Clique em Reposição ou Vendido para gravar. Pedido e fornecedor ficam em branco para digitar na lista.")
+    with st.form("lancar_produto_pedido", clear_on_submit=True, border=False):
+        campo_codigo, campo_descricao = st.columns(2)
+        codigo = campo_codigo.text_input("Código do produto", placeholder="INSERIR CÓDIGO")
+        descricao = campo_descricao.text_input("Descrição", placeholder="EX: FILTRO")
+        observacao = campo_descricao.text_input("Observação", placeholder="EX: PEDIR BOSCH")
+        botao_re, botao_ve = st.columns(2)
+        repor = botao_re.form_submit_button("Reposição", type="primary", width="stretch")
+        vender = botao_ve.form_submit_button("Vendido", type="primary", width="stretch")
+    if repor or vender:
+        lancar_item_pedido("VE" if vender else "RE", codigo, descricao, observacao)
+    aviso = st.session_state.pop("repo_aviso", "")
     if aviso:
         st.warning(aviso)
+    lançado = st.session_state.pop("repo_ok", "")
+    if lançado:
+        st.success(lançado)
     try:
         garantir_pedido_reposicao()
         frame = ler_pedidos_reposicao()
@@ -4099,6 +4138,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         mascara = False
         for coluna in colunas:
             mascara = mascara | visivel[coluna].fillna("").map(lambda valor: alvo in str(valor).casefold())
+        mascara = mascara | visivel["marcacao"].map(lambda valor: alvo in rotulo_marcacao(valor).casefold())
         visivel = visivel[mascara]
     if escolha != "Todas":
         visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
@@ -4109,6 +4149,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         descricao_com_observacao(descricao, observacao)
         for descricao, observacao in zip(visivel["descricao"], visivel["observacao"])
     ]
+    visivel["marcacao"] = [rotulo_marcacao(valor) for valor in visivel["marcacao"]]
     grade = visivel.rename(
         columns={
             "linha": "Linha",
@@ -4150,7 +4191,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         ]
     ]
     editado = st.data_editor(
-        grade,
+        pintar_vendido(grade),
         width="stretch",
         hide_index=True,
         height=640,
@@ -4174,7 +4215,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
             "Preço 3": st.column_config.NumberColumn("Preço 3", format="R$ %.2f"),
             "Preço 4": st.column_config.NumberColumn("Preço 4", format="R$ %.2f"),
         },
-        key="editor_pedido_reposicao",
+        key=f"editor_pedido_reposicao_{int(st.session_state.get('repo_grade_versao') or 0)}",
         alt="Itens da planilha de pedidos",
     )
     if st.button("Gravar pedido e fornecedor", type="primary", key="gravar_pedido_fornecedor"):
