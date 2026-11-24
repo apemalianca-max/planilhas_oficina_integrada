@@ -3832,16 +3832,6 @@ def senha_confere_id(usuario_id: int, senha: str) -> bool:
     return _senha_confere(senha, linha["senha_salt"], linha["senha_hash"])
 
 
-LINK_REPOSICAO = (
-    "https://onedrive.live.com/personal/f6bcc0f900f2d6d6/_layouts/15/doc2.aspx"
-    "?resid=00f2d6d6-c0f9-20bc-80f6-546b00000000&cid=f6bcc0f900f2d6d6"
-)
-LINK_REPOSICAO_EMBUTIDO = (
-    "https://onedrive.live.com/embed?resid=00f2d6d6-c0f9-20bc-80f6-546b00000000"
-    "&cid=f6bcc0f900f2d6d6&em=2"
-)
-
-
 def _parametro(nome: str) -> str:
     valor = st.query_params.get(nome, "")
     if isinstance(valor, (list, tuple)):
@@ -3911,24 +3901,129 @@ def atalho_reposicao_login() -> None:
         botao_copiar_link(url_painel_reposicao(), "login", "#d5e4ee")
 
 
-def tela_reposicao_estoque() -> None:
+def garantir_pedido_reposicao() -> None:
+    if st.session_state.get("pedido_reposicao_ok"):
+        return
+    with engine().begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS painel_pedido_reposicao (
+                    linha integer PRIMARY KEY,
+                    quantidade double precision,
+                    marcacao text,
+                    situacao text,
+                    loja text,
+                    codigo text,
+                    descricao text,
+                    preco double precision,
+                    marca text,
+                    preco_2 double precision,
+                    marca_2 text,
+                    preco_3 double precision,
+                    marca_3 text,
+                    preco_4 double precision,
+                    marca_4 text
+                )
+                """
+            )
+        )
+    st.session_state.pedido_reposicao_ok = True
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def ler_pedidos_reposicao() -> pd.DataFrame:
+    return query(
+        """
+        SELECT linha, quantidade, marcacao, situacao, loja, codigo, descricao,
+               preco, marca, preco_2, marca_2, preco_3, marca_3, preco_4, marca_4
+        FROM painel_pedido_reposicao
+        ORDER BY linha DESC
+        """
+    )
+
+
+def abrir_painel_pedidos() -> None:
+    st.session_state.ver_pedidos = True
+    st.rerun()
+
+
+def tela_reposicao_estoque(interno: bool = False) -> None:
     st.title("Pedido/Reposição de estoque")
-    st.caption("Este painel abre sem senha. O botão Link copia o endereço para quem for usar.")
-    acao1, acao2, acao3 = st.columns([1, 1, 1], vertical_alignment="center")
+    st.caption("Os itens da planilha de pedidos. O botão Link copia o endereço deste painel.")
+    acao1, acao2 = st.columns([1, 1], vertical_alignment="center")
     with acao1:
         botao_copiar_link(url_painel_reposicao(), "painel")
-    acao2.link_button("Abrir planilha", LINK_REPOSICAO, width="stretch")
-    if acao3.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
+    if interno:
+        if acao2.button("Voltar", width="stretch", key="voltar_reposicao"):
+            st.session_state.ver_pedidos = False
+            st.rerun()
+    elif acao2.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
         st.query_params.clear()
         st.rerun()
-    st.text_input(
-        "Endereço deste painel",
-        value=url_painel_reposicao(),
-        disabled=True,
-        key="endereco_reposicao",
+    try:
+        garantir_pedido_reposicao()
+        frame = ler_pedidos_reposicao()
+    except Exception:
+        st.info("A planilha de pedidos ainda não está disponível neste painel.")
+        return
+    if frame.empty:
+        st.info("A planilha de pedidos ainda não tem itens.")
+        return
+    termo = st.text_input(
+        "Pesquisar",
+        placeholder="Código, descrição, marca ou loja",
+        key="busca_pedido_reposicao",
+    ).strip()
+    lojas = {}
+    for nome in frame["loja"].dropna():
+        texto = str(nome).strip()
+        if texto:
+            lojas.setdefault(texto.casefold(), texto)
+    escolha = st.selectbox("Loja", ["Todas", *[lojas[chave] for chave in sorted(lojas)]], key="loja_pedido_reposicao")
+    visivel = frame
+    if termo:
+        alvo = termo.casefold()
+        colunas = ["marcacao", "situacao", "loja", "codigo", "descricao", "marca", "marca_2", "marca_3", "marca_4"]
+        mascara = False
+        for coluna in colunas:
+            mascara = mascara | visivel[coluna].fillna("").map(lambda valor: alvo in str(valor).casefold())
+        visivel = visivel[mascara]
+    if escolha != "Todas":
+        visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
+    st.caption(f"{inteiro(len(visivel))} itens. As últimas linhas da planilha aparecem primeiro.")
+    grade = visivel.rename(
+        columns={
+            "quantidade": "Qtde",
+            "marcacao": "RE/VE",
+            "situacao": "Situação",
+            "loja": "Loja",
+            "codigo": "Código",
+            "descricao": "Descrição",
+            "preco": "Preço",
+            "marca": "Marca",
+            "preco_2": "Preço 2",
+            "marca_2": "Marca 2",
+            "preco_3": "Preço 3",
+            "marca_3": "Marca 3",
+            "preco_4": "Preço 4",
+            "marca_4": "Marca 4",
+        }
+    ).drop(columns=["linha"])
+    st.dataframe(
+        grade,
+        width="stretch",
+        hide_index=True,
+        height=640,
+        column_config={
+            "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f"),
+            "Preço": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
+            "Preço 2": st.column_config.NumberColumn("Preço 2", format="R$ %.2f"),
+            "Preço 3": st.column_config.NumberColumn("Preço 3", format="R$ %.2f"),
+            "Preço 4": st.column_config.NumberColumn("Preço 4", format="R$ %.2f"),
+        },
+        alt="Itens da planilha de pedidos",
     )
-    st.iframe(LINK_REPOSICAO_EMBUTIDO, height=680, alt="Planilha de pedido e reposição de estoque")
-    st.caption("Se a planilha não aparecer aqui, use Abrir planilha.")
 
 
 def tela_acesso() -> None:
@@ -4339,6 +4434,8 @@ def tela_modulos() -> None:
             st.session_state.modulo = "pv"
             registrar_log("Acesso", f"Acessou o módulo {MODULO_PV}.", modulo=MODULO_PV)
             st.rerun()
+        if st.button("Pedido/Reposição  \nESTOQUE", key="mod_pedidos", type="primary", wrap=True):
+            abrir_painel_pedidos()
     if st.button("Sair", key="sair_modulos"):
         encerrar_sessao()
 
@@ -4650,6 +4747,8 @@ def cabecalho_modulo() -> None:
     with titulo:
         st.title(TITULO)
     with sair:
+        if st.button("Pedidos", width="stretch", key="topo_pedidos"):
+            abrir_painel_pedidos()
         if st.button("Menu", width="stretch", key="voltar_menu"):
             st.session_state.modulo = None
             st.rerun()
@@ -4665,6 +4764,8 @@ def lateral_modulo(usuario: dict, texto: str, legenda: str | None = None) -> Non
         if usuario["administrador"]:
             st.caption("Administrador")
         st.write(texto)
+        if st.button("Pedidos", width="stretch", key="menu_pedidos"):
+            abrir_painel_pedidos()
         if st.button("Sair", width="stretch", key="sair_menu"):
             encerrar_sessao()
         if st.button("Atualizar dados", width="stretch", key="atualizar_dados"):
@@ -9708,6 +9809,9 @@ def main() -> None:
     pulso_presenca()
     if st.session_state.usuario.get("trocar_senha"):
         tela_trocar_senha()
+        return
+    if st.session_state.get("ver_pedidos"):
+        tela_reposicao_estoque(interno=True)
         return
     usuario = st.session_state.usuario
     modulo = st.session_state.get("modulo")
