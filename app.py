@@ -392,6 +392,14 @@ def format_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+ALTURA_LINHA_PLANILHA = 72
+
+
+def mostrar_planilha(dados, **kwargs):
+    kwargs.setdefault("row_height", ALTURA_LINHA_PLANILHA)
+    return st.dataframe(dados, **kwargs)
+
+
 def column_config(columns: list[str]) -> dict:
     config = {}
     for column in columns:
@@ -548,7 +556,7 @@ def show_table(df: pd.DataFrame, key: str, legenda: str | None = None, destacar:
         return
     visible = format_frame(df)
     tabela = pintar_nao_pagas(visible) if destacar and "quitado" in visible.columns else visible
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         width="stretch",
         hide_index=True,
@@ -812,7 +820,7 @@ def visao_geral() -> None:
         """
     )
     if not top.empty:
-        st.dataframe(
+        mostrar_planilha(
             format_frame(top),
             width="stretch",
             hide_index=True,
@@ -829,7 +837,7 @@ def visao_geral() -> None:
     )
     if not importado.empty:
         with st.expander("Origem da importação"):
-            st.dataframe(format_frame(importado), width="stretch", hide_index=True)
+            mostrar_planilha(format_frame(importado), width="stretch", hide_index=True)
 
 
 def aba_os() -> None:
@@ -919,7 +927,7 @@ def aba_os() -> None:
             kwargs={"origem": "ordens", "chave": "os_click_lista"},
             key="os_click_lista",
         )
-        st.dataframe(
+        mostrar_planilha(
             visivel,
             width="stretch",
             hide_index=True,
@@ -986,7 +994,7 @@ def aba_os() -> None:
                 st.caption("Nenhum item ou serviço lançado nesta O.S.")
                 continue
             itens.insert(0, "Km", registro.km)
-            st.dataframe(
+            mostrar_planilha(
                 format_frame(itens),
                 width="stretch",
                 hide_index=True,
@@ -1683,7 +1691,7 @@ def render_os(numero: int) -> None:
     if itens.empty:
         st.caption("Nenhum item ou serviço lançado nesta O.S.")
         return
-    st.dataframe(
+    mostrar_planilha(
         format_frame(itens),
         width="stretch",
         hide_index=True,
@@ -1773,7 +1781,7 @@ def tabela_contas(frame: pd.DataFrame, origem: str, chave: str) -> None:
         config["os"] = coluna_os(origem, chave)
     tabela = pintar_nao_pagas(visivel, {"os"}) if "quitado" in visivel.columns else visivel
     st.caption("Clique no número da O.S. para abrir a ordem.")
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         width="stretch",
         hide_index=True,
@@ -2037,7 +2045,7 @@ def painel_historico() -> None:
             if itens.empty:
                 st.caption("Nenhum serviço lançado.")
                 continue
-            st.dataframe(
+            mostrar_planilha(
                 format_frame(itens),
                 width="stretch",
                 hide_index=True,
@@ -2064,10 +2072,10 @@ def config_baixas(origem: str, chave: str) -> dict:
         "valor_pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", min_value=0, step=0.01),
         "saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f", disabled=True),
         "dt_pagamento": st.column_config.DateColumn("Dt pagamento", format="DD/MM/YYYY"),
-        "obs_conta": st.column_config.TextColumn("Obs conta", width="large"),
+        "obs_conta": st.column_config.TextColumn("Obs conta", width=170),
         "forma_pagamento": st.column_config.TextColumn("Forma de pagamento", disabled=True),
         "parcela": st.column_config.NumberColumn("Parcela", format="%d", disabled=True),
-        "descricao": st.column_config.TextColumn("Descrição", disabled=True, width="large"),
+        "descricao": st.column_config.TextColumn("Descrição", disabled=True, width=170),
     }
     for coluna in bloqueadas:
         if coluna in config and isinstance(config[coluna], dict):
@@ -2203,6 +2211,38 @@ def separar_obs_encargos(obs: str) -> tuple[str, float | None, float | None]:
         elif chave == "multa":
             multa = numero
     return limpo.strip(), juros, multa
+
+
+def _texto_parcela(quando, valor: float, quitou: bool) -> str:
+    data = data_br(quando) or "sem data"
+    situacao = "quitação" if quitou else "parcial"
+    return f"Baixa {data}: {brl(valor)} ({situacao})"
+
+
+def obs_com_parciais(
+    obs: str,
+    linha: pd.Series,
+    valor_desta: float,
+    quando,
+    ja_pago: float,
+    quitar: bool,
+    reabrir: bool,
+) -> str:
+    if reabrir or ja_pago <= 0.004 or valor_desta <= 0.004:
+        return obs
+    texto = (obs or "").strip()
+    tem_historico = any(
+        linha.startswith("Baixa ") and linha.endswith(("(parcial)", "(quitação)"))
+        for linha in texto.splitlines()
+    )
+    novas = []
+    if not tem_historico:
+        novas.append(_texto_parcela(linha.get("dt_pagamento"), ja_pago, False))
+    novas.append(_texto_parcela(quando, valor_desta, quitar))
+    for nova in novas:
+        if nova not in texto:
+            texto = f"{texto}\n{nova}".strip() if texto else nova
+    return texto
 
 
 def obs_com_encargos(obs: str, juros: float, multa: float, gravar_marca: bool) -> str | None:
@@ -2650,7 +2690,15 @@ def _salvar_form_baixa(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
     if pago_total > 0 and quando is None:
         st.error("Informe a data do pagamento.")
         return
-    obs = texto_banco(st.session_state.get(f"bx_obs_{conta_id}"))
+    obs = obs_com_parciais(
+        texto_banco(st.session_state.get(f"bx_obs_{conta_id}")),
+        linha,
+        pago_campo,
+        quando,
+        valor_banco(linha["valor_pago"]),
+        quitar,
+        reabrir,
+    )
     gravar_conta_baixa(
         conta_id,
         pago=pago_total,
@@ -2734,7 +2782,12 @@ def dialogo_baixa() -> None:
         key=f"bx_data_{conta_id}",
         disabled=not liberado,
     )
-    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=80, disabled=not liberado)
+    if valor_banco(linha["valor_pago"]) > 0 and not reabrir:
+        st.caption(
+            "A partir desta baixa, a observação passa a listar cada pagamento com a data e o valor, "
+            "desde a primeira parcial até a quitação."
+        )
+    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=120, disabled=not liberado)
     juros, multa, pago_total, devido = _totais_baixa(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     r1, r2, r3 = st.columns(3)
@@ -2860,6 +2913,7 @@ def editor_baixas(contas: pd.DataFrame, origem: str, chave: str, legenda: str) -
         width="stretch",
         hide_index=True,
         height=560 if origem == "abertas" else 360,
+        row_height=ALTURA_LINHA_PLANILHA,
         num_rows="fixed",
         disabled=list(ABERTAS_COLS) if not liberado else [coluna for coluna in ABERTAS_COLS if coluna not in CAMPOS_BAIXA],
         column_config=config_baixas(origem, chave),
@@ -3283,7 +3337,7 @@ def dialogo_dividas() -> None:
         "saldo": st.column_config.NumberColumn("Saldo", format="R$ %.2f"),
         "descricao": st.column_config.TextColumn("Descrição"),
     }
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
@@ -3340,7 +3394,7 @@ def aba_clientes() -> None:
                 key="cli_click_divida",
             ),
         }
-        st.dataframe(
+        mostrar_planilha(
             pintar_faixa(grade, VERMELHO, {"divida"}),
             width="stretch",
             hide_index=True,
@@ -3359,7 +3413,7 @@ def aba_clientes() -> None:
             "cliente": st.column_config.TextColumn("Cliente"),
             "a_vencer": st.column_config.NumberColumn("A vencer", format="R$ %.2f"),
         }
-        st.dataframe(
+        mostrar_planilha(
             pintar_faixa(grade, AZUL),
             width="stretch",
             hide_index=True,
@@ -3886,7 +3940,7 @@ def mostrar_historico_alteracao(escopo: str | None = None, registro: str | None 
             "novo": "Depois",
         }
     )
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         hide_index=True,
         width="stretch",
@@ -4050,7 +4104,7 @@ def mostrar_presenca() -> None:
             "ultimo_acesso": "Último acesso",
         }
     )
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         hide_index=True,
         width="stretch",
@@ -4671,12 +4725,13 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         width="stretch",
         hide_index=True,
         height=640,
+        row_height=ALTURA_LINHA_PLANILHA,
         num_rows="fixed",
         disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Qtde", "Fornecedor", "Excluir"}],
         column_config={
             "Excluir": st.column_config.ButtonColumn(
                 "Excluir",
-                width="small",
+                width=72,
                 pinned=True,
                 help="Tira este produto da listagem",
                 on_click=excluir_item_pedido,
@@ -4839,7 +4894,7 @@ def aba_usuarios() -> None:
             "trocar_senha": "Troca pendente",
         }
     )
-    st.dataframe(visivel, hide_index=True, width="stretch", alt="Usuários cadastrados no painel")
+    mostrar_planilha(visivel, hide_index=True, width="stretch", alt="Usuários cadastrados no painel")
     escolhido = st.selectbox(
         "Alterar usuário",
         lista["id"].tolist(),
@@ -4933,13 +4988,13 @@ def aba_log() -> None:
             "detalhe": "Detalhe",
         }
     )
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         hide_index=True,
         width="stretch",
         column_config={
             "Quando": st.column_config.DatetimeColumn("Quando", format="DD/MM/YYYY HH:mm"),
-            "Detalhe": st.column_config.TextColumn("Detalhe", width="large"),
+            "Detalhe": st.column_config.TextColumn("Detalhe", width=220),
         },
         alt="Acessos e alterações do painel",
     )
@@ -4979,7 +5034,7 @@ def aba_log() -> None:
                 }
             )
             st.caption(f"{inteiro(len(grade))} alteração(ões).")
-            st.dataframe(
+            mostrar_planilha(
                 grade,
                 hide_index=True,
                 width="stretch",
@@ -6500,14 +6555,14 @@ def dialogo_notas_cliente() -> None:
             "Baixar": ["Baixar"] * len(linhas),
         }
     )
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
         height=min(420, max(160, 48 + len(visivel) * 35)),
         column_config={
             "Código": st.column_config.TextColumn("Código", width="small"),
-            "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+            "Descrição": st.column_config.TextColumn("Descrição", width=160),
             "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
             "Situação": st.column_config.TextColumn("Situação", width="small"),
             "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
@@ -6584,7 +6639,7 @@ def mostrar_totais_cliente(contas: pd.DataFrame) -> None:
         tinta = VERMELHO if valor_banco(linha["vencido"]) > 0 else AZUL
         return ["" if coluna == "notas" else tinta for coluna in linha.index]
 
-    st.dataframe(
+    mostrar_planilha(
         grade.style.apply(cor_cliente, axis=1),
         width="stretch",
         hide_index=True,
@@ -6686,7 +6741,7 @@ def listar_next_abertas(
         tabela = visivel
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
-        "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+        "Descrição": st.column_config.TextColumn("Descrição", width=160),
         "Vencimento": st.column_config.TextColumn("Vencimento", width="small"),
         "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
         "Pedido": st.column_config.ButtonColumn(
@@ -6728,7 +6783,7 @@ def listar_next_abertas(
         )
     if mostrar_dias:
         config["Dias vencidos"] = st.column_config.NumberColumn("Dias vencidos", format="%d", width="small")
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         width="stretch",
         hide_index=True,
@@ -6800,7 +6855,7 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
     visivel = pd.DataFrame(colunas)
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
-        "Descrição": st.column_config.TextColumn("Descrição", width="medium"),
+        "Descrição": st.column_config.TextColumn("Descrição", width=160),
         "Pagamento": st.column_config.TextColumn("Pagamento", width="small"),
         "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
         "Pedido": st.column_config.ButtonColumn(
@@ -6846,7 +6901,7 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             on_click=_clique_os_top("nx_os_top_recentes", "nx_click_os_top_recentes"),
             key="nx_click_os_top_recentes",
         )
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
@@ -7052,7 +7107,15 @@ def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
     if pago_total > 0 and quando is None:
         st.error("Informe a data do pagamento.")
         return
-    obs = texto_banco(st.session_state.get(f"nx_obs_{conta_id}"))
+    obs = obs_com_parciais(
+        texto_banco(st.session_state.get(f"nx_obs_{conta_id}")),
+        linha,
+        pago_campo,
+        quando,
+        valor_banco(linha["valor_pago"]),
+        quitar,
+        reabrir,
+    )
     gravar_next_baixa(
         conta_id,
         pago=pago_total,
@@ -7181,7 +7244,12 @@ def dialogo_baixa_next() -> None:
         disabled=not liberado,
     )
     p2.date_input("Data do pagamento", format="DD/MM/YYYY", key=f"nx_data_{conta_id}", disabled=not liberado)
-    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=80, disabled=not liberado)
+    if valor_banco(linha["valor_pago"]) > 0 and not reabrir:
+        st.caption(
+            "A partir desta baixa, a observação passa a listar cada pagamento com a data e o valor, "
+            "desde a primeira parcial até a quitação."
+        )
+    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=120, disabled=not liberado)
     juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     if pagar:
@@ -7232,7 +7300,7 @@ def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False) -> 
         tabela = pintar_nao_pagas(visivel)
     else:
         tabela = visivel
-    st.dataframe(
+    mostrar_planilha(
         tabela,
         width="stretch",
         hide_index=True,
@@ -7903,39 +7971,46 @@ def painel_contas_next() -> None:
                 "Dias vencidos",
                 {"Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Documento"},
             )
-        st.dataframe(
+        mostrar_planilha(
             tabela,
             width="stretch",
             hide_index=True,
             height=420,
             column_config={
-                "Dias vencidos": st.column_config.NumberColumn("Dias vencidos", format="%d", width="small"),
-                "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f"),
-                "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f"),
+                "Código": st.column_config.TextColumn("Código", width=64),
+                "Duplicata": st.column_config.TextColumn("Duplicata", width=72),
+                "Data Vencto.": st.column_config.TextColumn("Data Vencto.", width=86),
+                "Dias vencidos": st.column_config.NumberColumn("Dias vencidos", format="%d", width=56),
+                "Nome/Razão Social": st.column_config.TextColumn("Nome/Razão Social", width=120),
+                "Data Emissão": st.column_config.TextColumn("Data Emissão", width=78),
+                "Histórico Lançamento": st.column_config.TextColumn("Histórico Lançamento", width=140),
+                "Data pagto.": st.column_config.TextColumn("Data pagto.", width=78),
+                "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width=86),
+                "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f", width=82),
                 "Pedido": st.column_config.ButtonColumn(
                     "Pedido",
-                    width="small",
+                    width=60,
                     help="Abre o pedido de venda citado no histórico",
                     on_click=click_pedido_lancamento,
                     key="nx_click_pedido_grade",
                 ),
                 "O.S. NeXT": st.column_config.ButtonColumn(
                     "O.S. NeXT",
-                    width="small",
+                    width=68,
                     help="Abre a ordem de serviço do NeXT ligada ao pedido",
                     on_click=_clique_os("nx_os_next_lancamento", "nx_click_os_next_lancamento", False),
                     key="nx_click_os_next_lancamento",
                 ),
                 "O.S. Oficina": st.column_config.ButtonColumn(
                     "O.S. Oficina",
-                    width="small",
+                    width=74,
                     help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
                     on_click=_clique_os("nx_os_oficina_lancamento", "nx_click_os_oficina_lancamento", True),
                     key="nx_click_os_oficina_lancamento",
                 ),
                 "O. TOP": st.column_config.ButtonColumn(
                     "O. TOP",
-                    width="small",
+                    width=52,
                     help="A O.S. é do sistema Oficina Top. O clique mostra como procurá-la no novo sistema",
                     on_click=_clique_os_top("nx_os_top_lancamento", "nx_click_os_top_lancamento"),
                     key="nx_click_os_top_lancamento",
@@ -7943,7 +8018,7 @@ def painel_contas_next() -> None:
                 "Documento": st.column_config.ButtonColumn(
                     "Documento",
                     type="primary",
-                    width="small",
+                    width=84,
                     on_click=click_lancamento_grade,
                     key="nx_click_lancamento",
                 ),
@@ -7983,7 +8058,7 @@ def painel_contas_next() -> None:
                 quitado = conta is not None and str(conta["quitado"] or "").strip().casefold() == "sim"
                 abrir_baixa_next(int(achado.iat[0, 0]), False, quitado)
     else:
-        st.dataframe(pd.DataFrame(columns=colunas), width="stretch", hide_index=True, height=180, alt="Lançamentos")
+        mostrar_planilha(pd.DataFrame(columns=colunas), width="stretch", hide_index=True, height=180, alt="Lançamentos")
     _painel_operacao_contas(tipo)
     if st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
@@ -8069,7 +8144,7 @@ def origem_next() -> None:
     if origem.empty:
         return
     with st.expander("Origem da importação"):
-        st.dataframe(format_frame(origem), width="stretch", hide_index=True)
+        mostrar_planilha(format_frame(origem), width="stretch", hide_index=True)
 
 
 def _cartao_caixa(titulo: str, valor: str, detalhe: str, fundo: str, borda: str, tinta: str) -> str:
@@ -8201,7 +8276,7 @@ def visao_next() -> None:
             for nome, coluna_qtd, coluna_valor in faixas
         ]
     )
-    st.dataframe(
+    mostrar_planilha(
         idade,
         width="stretch",
         hide_index=True,
@@ -8255,7 +8330,7 @@ def visao_next() -> None:
     if top.empty:
         st.caption("Nenhuma conta a receber em aberto.")
     else:
-        st.dataframe(
+        mostrar_planilha(
             format_frame(top),
             width="stretch",
             hide_index=True,
@@ -8364,7 +8439,7 @@ def dialogo_dividas_next() -> None:
     linhas["vencimento"] = linhas["vencimento"].map(data_br)
     st.caption(f"Dívida vencida: {brl(linhas['saldo'].sum())}.")
     visivel = linhas[["codigo", "descricao", "vencimento", "dias", "parcela", "valor", "valor_pago", "saldo"]]
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
@@ -8487,7 +8562,7 @@ def _grade_documentos(lista: pd.DataFrame, pessoa: str) -> None:
         ),
         "Número": st.column_config.TextColumn("Número", width="small"),
         "Data": st.column_config.TextColumn("Data", width="small"),
-        pessoa: st.column_config.TextColumn(pessoa, width="large"),
+        pessoa: st.column_config.TextColumn(pessoa, width=160),
         "Situação": st.column_config.TextColumn("Situação", width="small"),
         "Peças": st.column_config.NumberColumn("Peças", format="%d", width="small"),
         "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f", width="small"),
@@ -8495,8 +8570,8 @@ def _grade_documentos(lista: pd.DataFrame, pessoa: str) -> None:
     if "Protocolo" in grade.columns:
         colunas["Protocolo"] = st.column_config.TextColumn("Protocolo")
     if "Chave" in grade.columns:
-        colunas["Chave"] = st.column_config.TextColumn("Chave", width="large")
-    st.dataframe(
+        colunas["Chave"] = st.column_config.TextColumn("Chave", width=160)
+    mostrar_planilha(
         pintar_situacao_aberta(grade, {"Abrir"}),
         width="stretch",
         hide_index=True,
@@ -8526,7 +8601,7 @@ def _tabela_pecas(itens: pd.DataFrame) -> None:
         "marca": st.column_config.TextColumn("Marca"),
         "cfop": st.column_config.TextColumn("CFOP"),
     }
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
@@ -8544,7 +8619,7 @@ def _tabela_eventos(eventos: pd.DataFrame) -> None:
         return
     visivel = eventos.copy()
     visivel["data"] = visivel["data"].map(lambda valor: data_br(valor) or "—")
-    st.dataframe(
+    mostrar_planilha(
         visivel,
         width="stretch",
         hide_index=True,
@@ -9034,7 +9109,7 @@ def painel_do_cliente(nome: str, chave: str, papel: str = "cliente") -> None:
             st.markdown("**Compras deste fornecedor**")
             compras = compras.rename(columns={"nota": "Nota", "data": "Data", "valor": "Valor"})
             compras["Data"] = compras["Data"].map(data_br)
-            st.dataframe(
+            mostrar_planilha(
                 compras,
                 width="stretch",
                 hide_index=True,
@@ -9095,7 +9170,7 @@ def painel_do_cliente(nome: str, chave: str, papel: str = "cliente") -> None:
         st.markdown("**Pedidos deste cliente**")
         pedidos = pedidos.rename(columns={"numero": "Pedido", "data": "Data", "valor": "Valor"})
         pedidos["Data"] = pedidos["Data"].map(data_br)
-        st.dataframe(
+        mostrar_planilha(
             pedidos,
             width="stretch",
             hide_index=True,
@@ -9109,7 +9184,7 @@ def painel_do_cliente(nome: str, chave: str, papel: str = "cliente") -> None:
             columns={"codigo": "OS", "emissao": "Emissão", "veiculo": "Veículo", "status": "Status", "total": "Total"}
         )
         ordens["Emissão"] = ordens["Emissão"].map(data_br)
-        st.dataframe(
+        mostrar_planilha(
             ordens,
             width="stretch",
             hide_index=True,
@@ -9408,14 +9483,14 @@ def ficha_pedido(codigo: str) -> None:
     total_produtos = round(float(grade["Valor"].sum()), 2) if not grade.empty else 0.0
     produtos, servicos = st.tabs(["Dados dos produtos", "Dados de serviços"])
     with produtos:
-        st.dataframe(
+        mostrar_planilha(
             grade,
             width="stretch",
             hide_index=True,
             height=min(420, max(180, 48 + len(grade) * 36)),
             column_config={
                 "Código": st.column_config.TextColumn("Código", width="small"),
-                "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width="large"),
+                "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width=170),
                 "UN": st.column_config.TextColumn("UN", width="small"),
                 "Qtde.": st.column_config.NumberColumn("Qtde.", format="%.3f", width="small"),
                 "Preço unitário": st.column_config.NumberColumn("Preço unitário", format="R$ %.2f"),
@@ -9694,14 +9769,14 @@ def ficha_os(codigo: str) -> None:
         if grade_produtos.empty:
             st.info("Esta ordem não tem peças na planilha de produtos.", title="Peças")
         else:
-            st.dataframe(
+            mostrar_planilha(
                 grade_produtos,
                 width="stretch",
                 hide_index=True,
                 height=min(420, max(180, 48 + len(grade_produtos) * 36)),
                 column_config={
                     "Código": st.column_config.TextColumn("Código", width="small"),
-                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width="large"),
+                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width=170),
                     "UN": st.column_config.TextColumn("UN", width="small"),
                     "Qtde.": st.column_config.NumberColumn("Qtde.", format="%.3f", width="small"),
                     "Preço unitário": st.column_config.NumberColumn("Preço unitário", format="R$ %.2f"),
@@ -9782,14 +9857,14 @@ def dialogo_documento_cruz() -> None:
         if grade_produtos.empty:
             st.info("Este orçamento não tem peças na planilha de produtos.", title="Peças")
         else:
-            st.dataframe(
+            mostrar_planilha(
                 grade_produtos,
                 width="stretch",
                 hide_index=True,
                 height=min(420, max(180, 48 + len(grade_produtos) * 36)),
                 column_config={
                     "Código": st.column_config.TextColumn("Código", width="small"),
-                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width="large"),
+                    "Descrição do produto": st.column_config.TextColumn("Descrição do produto", width=170),
                     "UN": st.column_config.TextColumn("UN", width="small"),
                     "Qtde.": st.column_config.NumberColumn("Qtde.", format="%.3f", width="small"),
                     "Preço unitário": st.column_config.NumberColumn("Preço unitário", format="R$ %.2f"),
@@ -10321,7 +10396,7 @@ def grade_next(frame: pd.DataFrame, alt: str, moedas: set[str] | None = None) ->
         if coluna in frame.columns
     }
     st.caption(f"{inteiro(len(frame))} registros.")
-    st.dataframe(frame, width="stretch", hide_index=True, height=560, column_config=config, alt=alt)
+    mostrar_planilha(frame, width="stretch", hide_index=True, height=560, column_config=config, alt=alt)
 
 
 def _filtrar_grade(frame: pd.DataFrame, termo: str) -> pd.DataFrame:
@@ -10373,7 +10448,7 @@ def tela_pessoas(papel: str) -> None:
         }
     )
     frame.insert(0, "Abrir", "Abrir")
-    st.dataframe(
+    mostrar_planilha(
         frame,
         width="stretch",
         hide_index=True,
@@ -10444,6 +10519,7 @@ def tela_produtos(reposicao: bool = False) -> None:
         width="stretch",
         hide_index=True,
         height=560,
+        row_height=ALTURA_LINHA_PLANILHA,
         num_rows="fixed",
         disabled=["codigo"],
         column_config={
@@ -10542,6 +10618,7 @@ def tela_servicos() -> None:
         width="stretch",
         hide_index=True,
         height=560,
+        row_height=ALTURA_LINHA_PLANILHA,
         num_rows="fixed",
         disabled=["codigo"],
         column_config={
@@ -10627,7 +10704,7 @@ def tela_os_abertas() -> None:
             "Valor": frame["total"],
         }
     )
-    st.dataframe(
+    mostrar_planilha(
         pintar_situacao_aberta(visivel, {"Abrir"}),
         width="stretch",
         hide_index=True,
