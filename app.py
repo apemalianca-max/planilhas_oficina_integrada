@@ -1383,12 +1383,220 @@ def servicos_da_os(bloco: pd.DataFrame) -> pd.DataFrame:
     return bloco.loc[tem_item, colunas]
 
 
+def _numero_documento(valor) -> float | None:
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except TypeError:
+        pass
+    return round(float(valor), 2)
+
+
+def _conta_do_documento(frame: pd.DataFrame, coluna: str, alvo: float | None) -> dict | None:
+    if frame.empty:
+        return None
+
+    def aberta(linha) -> bool:
+        return str(linha["quitado"] or "").strip().casefold() != "sim"
+
+    registros = [frame.iloc[indice] for indice in range(len(frame))]
+    pool = [linha for linha in registros if aberta(linha)] or registros
+    if alvo is not None:
+        for linha in pool:
+            valor = _numero_documento(linha[coluna])
+            if valor is not None and abs(valor - alvo) < 0.02:
+                return {
+                    "id": int(linha["id"]),
+                    "quitado": linha["quitado"],
+                    "valor": valor,
+                    "vencimento": linha["vencimento"],
+                }
+    linha = pool[0]
+    return {
+        "id": int(linha["id"]),
+        "quitado": linha["quitado"],
+        "valor": _numero_documento(linha[coluna]),
+        "vencimento": linha["vencimento"],
+    }
+
+
+def valor_documento_os(numero: int) -> float | None:
+    total = scalar("SELECT SUM(valor_total) FROM oficina_os WHERE id_os = ?", (numero,))
+    valor = _numero_documento(total)
+    if valor:
+        return valor
+    conta = conta_baixa_os(numero, None)
+    if conta and conta["valor"]:
+        return conta["valor"]
+    return valor
+
+
+def conta_baixa_os(numero: int, alvo: float | None) -> dict | None:
+    frame = query(
+        """
+        SELECT id, quitado, valor, vencimento
+        FROM oficina_financeiro
+        WHERE ltrim(CAST(os AS text), '0') = ?
+          AND lower(COALESCE(tipo, '')) = 'receita'
+        ORDER BY id
+        """,
+        (str(int(numero)),),
+    )
+    return _conta_do_documento(frame, "valor", alvo)
+
+
+def valor_documento_pedido(codigo: str) -> float | None:
+    detalhe = detalhe_do_pedido(codigo)
+    valor = _numero_documento(detalhe.get("valor_total"))
+    if valor:
+        return valor
+    conta = conta_baixa_pedido(codigo, None)
+    if conta and conta["valor"]:
+        return conta["valor"]
+    return valor
+
+
+def conta_baixa_pedido(codigo: str, alvo: float | None) -> dict | None:
+    chave = _chave_numero(codigo)
+    if not chave:
+        return None
+    frame = query(
+        f"""
+        SELECT id, quitado, valor_liquido, vencimento
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+          AND {_PEDIDO_NO_HISTORICO} = ?
+        ORDER BY id
+        """,
+        (chave,),
+    )
+    return _conta_do_documento(frame, "valor_liquido", alvo)
+
+
+def mostrar_destaque_documento(rotulo: str, valor: float | None, vencimento, quitado) -> None:
+    dias = dias_em_atraso(vencimento, quitado)
+    quando = data_br(vencimento) or "Sem vencimento"
+    pago = str(quitado or "").strip().casefold() == "sim"
+    if dias:
+        fundo = "#9f1239"
+        numero_dias = str(dias)
+        legenda_dias = "Dias vencidos"
+    elif pago:
+        fundo = "#0c6b4d"
+        numero_dias = "Quitada"
+        legenda_dias = "Situação"
+    elif data_iso(vencimento) is not None:
+        fundo = "#0c6b4d"
+        numero_dias = "Em dia"
+        legenda_dias = "Dias vencidos"
+    else:
+        fundo = "#16324f"
+        numero_dias = "—"
+        legenda_dias = "Dias vencidos"
+    valor_txt = brl(valor) if valor is not None else "—"
+    st.html(
+        f"""
+        <div style="background:{fundo};color:#f4fbf7;border-radius:12px;padding:0.9rem 1.1rem;margin:0 0 0.85rem;">
+          <div style="font-size:0.95rem;font-weight:700;">{html.escape(rotulo)}</div>
+          <div style="display:flex;gap:1.8rem;flex-wrap:wrap;margin-top:0.4rem;">
+            <div>
+              <div style="font-size:0.78rem;opacity:0.85;">Valor</div>
+              <div style="font-size:1.7rem;font-weight:800;line-height:1.15;">{html.escape(valor_txt)}</div>
+            </div>
+            <div>
+              <div style="font-size:0.78rem;opacity:0.85;">{html.escape(legenda_dias)}</div>
+              <div style="font-size:1.7rem;font-weight:800;line-height:1.15;">{html.escape(numero_dias)}</div>
+            </div>
+            <div>
+              <div style="font-size:0.78rem;opacity:0.85;">Vencimento</div>
+              <div style="font-size:1.7rem;font-weight:800;line-height:1.15;">{html.escape(quando)}</div>
+            </div>
+          </div>
+        </div>
+        """
+    )
+
+
+def destaque_os_oficina(numero: int) -> None:
+    valor = valor_documento_os(numero)
+    conta = conta_baixa_os(numero, valor)
+    mostrar_destaque_documento(
+        f"O.S. {numero}",
+        valor,
+        conta["vencimento"] if conta else None,
+        conta["quitado"] if conta else "",
+    )
+
+
+def destaque_pedido(codigo: str) -> None:
+    valor = valor_documento_pedido(codigo)
+    conta = conta_baixa_pedido(codigo, valor)
+    mostrar_destaque_documento(
+        f"Pedido {_chave_numero(codigo)}",
+        valor,
+        conta["vencimento"] if conta else None,
+        conta["quitado"] if conta else "",
+    )
+
+
+def abrir_baixa_pedido(conta_id: int, quitado: bool) -> None:
+    st.session_state.fin_os_perguntar = None
+    st.session_state.fin_os_aberta = None
+    st.session_state.modulo = "pv"
+    st.session_state.tela_next = "receber"
+    st.session_state.menu_next_aberto = "Financeiro"
+    st.session_state.tela_next_rotulo = "Financeiro · Contas a receber"
+    st.session_state.next_fin_lista = "receber"
+    st.session_state.nx_visualizar = "Contas a receber"
+    abrir_baixa_next(int(conta_id), ver=quitado)
+    st.rerun()
+
+
+def mostrar_baixa_documentos_os(numero: int) -> None:
+    itens = pedidos_ligados("os_oficina", str(numero))
+    pedidos = []
+    for item in itens:
+        codigo = _chave_numero(item.get("pedido"))
+        if codigo and codigo not in pedidos:
+            pedidos.append(codigo)
+    valor_os = valor_documento_os(numero)
+    conta_os = conta_baixa_os(numero, valor_os)
+    st.markdown("**Valor de cada documento**")
+    st.caption("O valor mostrado é só o daquele documento. A baixa completa abre no botão.")
+    colunas = st.columns(1 + len(pedidos))
+    with colunas[0]:
+        st.metric(f"O.S. {numero}", brl(valor_os) if valor_os is not None else "—")
+        if conta_os and colunas[0].button("Baixa da O.S.", type="primary", key=f"baixa_os_{numero}"):
+            st.session_state.aba = ABA_FIN
+            abrir_baixa(int(conta_os["id"]))
+            st.rerun()
+        elif not conta_os:
+            st.caption("Sem conta de baixa desta O.S.")
+    for indice, pedido in enumerate(pedidos, start=1):
+        valor_pedido = valor_documento_pedido(pedido)
+        conta_pedido = conta_baixa_pedido(pedido, valor_pedido)
+        with colunas[indice]:
+            st.metric(f"Pedido {pedido}", brl(valor_pedido) if valor_pedido is not None else "—")
+            quitado = bool(conta_pedido) and str(conta_pedido["quitado"] or "").strip().casefold() == "sim"
+            if conta_pedido and st.button(
+                "Baixa do pedido",
+                type="primary",
+                key=f"baixa_ped_{numero}_{pedido}",
+            ):
+                abrir_baixa_pedido(int(conta_pedido["id"]), quitado)
+            elif not conta_pedido:
+                st.caption("Sem conta de baixa deste pedido.")
+
+
 def render_os(numero: int) -> None:
-    mostrar_pedidos_da_os("oficina", str(numero))
     existe = int(scalar("SELECT COUNT(*) FROM oficina_os WHERE id_os = ?", (numero,)) or 0)
     if not existe:
         st.warning(f"A OS {numero} não está no histórico de ordens.")
         return
+    destaque_os_oficina(numero)
+    mostrar_pedidos_da_os("oficina", str(numero))
     cab = query(
         f"""
         SELECT MAX(nome_cliente) AS nome_cliente,
@@ -1414,7 +1622,7 @@ def render_os(numero: int) -> None:
             vinculos["os_next"],
             _juntar_codigos([str(numero), vinculos["os_oficina"]]),
         )
-        botao_financeiro_vinculado(str(numero), f"fin_ofi_{numero}")
+        mostrar_baixa_documentos_os(numero)
     st.table(
         {
             "Cliente": texto_limpo(linha.nome_cliente),
@@ -7439,15 +7647,14 @@ def painel_contas_next() -> None:
                 else ""
             )
         )
-        tabela = visivel
         if tipo == "receber" and "Dias vencidos" in visivel.columns:
-            tabela = pintar_dias_vencidos(
+            visivel = pintar_dias_vencidos(
                 visivel,
                 "Dias vencidos",
                 {"Pedido", "O.S. NeXT", "O.S. Oficina", "Documento"},
             )
         st.dataframe(
-            tabela,
+            visivel,
             width="stretch",
             hide_index=True,
             height=420,
@@ -8694,6 +8901,7 @@ def ficha_pedido(codigo: str) -> None:
         (codigo,),
     )
     st.subheader("Pedido de venda")
+    destaque_pedido(codigo)
     if pecas.empty:
         detalhe = detalhe_do_pedido(codigo)
         if not detalhe:
@@ -9115,11 +9323,17 @@ def ficha_os(codigo: str) -> None:
         (codigo,),
     )
     st.subheader("Ordem de serviço NeXT")
-    mostrar_pedidos_da_os("next", codigo)
     if cab.empty:
         st.info("Ordem de serviço não encontrada.")
         return
     linha = cab.iloc[0]
+    mostrar_destaque_documento(
+        f"O.S. NeXT {_chave_numero(codigo)}",
+        _numero_documento(linha["total"]),
+        None,
+        "",
+    )
+    mostrar_pedidos_da_os("next", codigo)
     cliente = texto_limpo(linha["cliente"])
     codigo_cliente = _texto_detalhe(linha["codcli"]) or _codigo_cliente(cliente)
     grade_produtos = _grade_produtos_os(codigo)
