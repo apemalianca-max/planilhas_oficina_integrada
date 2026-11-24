@@ -5868,7 +5868,7 @@ def mapa_os_dos_pedidos() -> dict[str, tuple[str, str, str]]:
     frame = query(
         """
         SELECT codvenda, codos, os_oficina,
-               substring(COALESCE(observacoes, '') from '(?i)OS[[:space:]]*#[[:space:]]*([0-9]+)') AS os_top
+               substring(lower(COALESCE(observacoes, '')) from 'os[[:space:]]*#[[:space:]]*([0-9]+)') AS os_top
         FROM next_pedido_detalhe
         WHERE COALESCE(codos, '') <> ''
            OR COALESCE(os_oficina, '') <> ''
@@ -9026,6 +9026,14 @@ def ficha_pedido(codigo: str) -> None:
                    LIMIT 1
                ) AS codigo_produto,
                (
+                   SELECT p.descricao
+                   FROM next_produto p
+                   WHERE trim(COALESCE(v.cod_fabricante, '')) <> ''
+                     AND p.cod_fabricante = v.cod_fabricante
+                   ORDER BY p.codigo
+                   LIMIT 1
+               ) AS descricao_produto,
+               (
                    SELECT p.estoque
                    FROM next_produto p
                    WHERE trim(COALESCE(v.cod_fabricante, '')) <> ''
@@ -9251,7 +9259,7 @@ def ficha_pedido(codigo: str) -> None:
         linhas.append(
             {
                 "Código": codigo_item,
-                "Descrição do produto": texto_limpo(item.produto),
+                "Descrição do produto": texto_limpo(item.descricao_produto) or texto_limpo(item.produto),
                 "UN": texto_limpo(item.unidade),
                 "Qtde.": qtd,
                 "Preço unitário": preco,
@@ -9323,7 +9331,7 @@ def ficha_pedido(codigo: str) -> None:
         st.caption(
             "Hora, entrega, observação, desconto, nota e total do pedido vêm da planilha de detalhes quando ela traz o campo. "
             "As linhas de serviço e os impostos não vieram nessa planilha. Estoque e local são os do cadastro atual. "
-            "Quando o pedido não trouxe o nome da peça, as linhas são as do orçamento vinculado com o mesmo total."
+            "Quando a linha da venda não trouxe o nome da peça, a descrição é a do cadastro do produto com o mesmo código de fabricante. "
         )
     if not notas.empty:
         for nota in notas.itertuples(index=False):
