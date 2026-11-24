@@ -650,38 +650,30 @@ def ir_financeiro_aberto() -> None:
     st.session_state.financeiro_aberto = True
 
 
-def texto_lembrete_baixa() -> str:
-    aviso = f"NENHUMA BAIXA NOS ÚLTIMOS {DIAS_EDICAO_BAIXA} DIAS."
-    ultima = scalar(
-        """
-        SELECT MAX(substr(IFNULL(dt_pagamento, ''), 1, 10))
-        FROM oficina_financeiro
-        WHERE tipo = 'Receita'
-          AND lower(IFNULL(quitado, '')) = 'sim'
-          AND substr(IFNULL(dt_pagamento, ''), 1, 10) <> ''
-        """
-    )
-    if not ultima:
-        return aviso
-    quando = pd.to_datetime(str(ultima)[:10], errors="coerce")
-    if pd.isna(quando):
-        return aviso
-    dias = (date.today() - quando.date()).days
-    if dias >= DIAS_EDICAO_BAIXA:
-        return aviso
-    if dias <= 0:
-        return "Última baixa hoje."
-    if dias == 1:
-        return "Última baixa a 1 dia."
-    return f"Última baixa a {dias} dias."
+def _botao_ultimas_baixas(origem: str, chave: str) -> None:
+    _, centro, _ = st.columns([2, 1.2, 2])
+    with centro:
+        if st.button("Últimas baixas", key=f"ultimas_{chave}", type="primary", width="stretch"):
+            st.session_state.ultimas_lista = origem
 
 
 def mostrar_lembrete_baixa() -> None:
-    texto = html.escape(texto_lembrete_baixa())
-    st.markdown(
-        "<p style='text-align:center;font-weight:700;font-size:1.05rem;margin:0.15rem 0 0.7rem'>"
-        f"{texto}</p>",
-        unsafe_allow_html=True,
+    _botao_ultimas_baixas("oficina", "oficina")
+
+
+def ultimas_baixas_oficina() -> pd.DataFrame:
+    return query(
+        """
+        SELECT id, os, nome, quitado, valor_pago, dt_pagamento, descricao
+        FROM oficina_financeiro
+        WHERE tipo = 'Receita'
+          AND (
+            lower(COALESCE(quitado, '')) = 'sim'
+            OR COALESCE(valor_pago, 0) > 0.004
+          )
+        ORDER BY substr(COALESCE(dt_pagamento, ''), 1, 10) DESC, id DESC
+        LIMIT 20
+        """
     )
 
 
@@ -691,6 +683,7 @@ def visao_geral() -> None:
         st.session_state.historico_aberto = True
     if st.session_state.get("historico_aberto"):
         painel_historico()
+        dialogos_da_visao_oficina()
         return
     ordens = int(scalar("SELECT COUNT(DISTINCT id_os) FROM oficina_os") or 0)
     itens = int(scalar("SELECT COUNT(*) FROM oficina_os") or 0)
@@ -838,6 +831,7 @@ def visao_geral() -> None:
     if not importado.empty:
         with st.expander("Origem da importação"):
             mostrar_planilha(format_frame(importado), width="stretch", hide_index=True)
+    dialogos_da_visao_oficina()
 
 
 def aba_os() -> None:
@@ -3206,7 +3200,7 @@ def aba_financeiro() -> None:
         "Reabrir baixa abre a mesma tela da conta para os ajustes."
     )
     if recentes.empty:
-        mostrar_lembrete_baixa()
+        st.info("Nenhuma baixa nos últimos 7 dias.")
     else:
         r1, r2 = st.columns(2)
         r1.metric("Baixas no prazo", inteiro(len(recentes)))
@@ -3285,6 +3279,8 @@ def aba_financeiro() -> None:
         dialogo_baixa()
     elif st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") != "ordens":
         dialogo_os()
+    elif st.session_state.get("ultimas_lista") == "oficina":
+        dialogo_ultimas_baixas()
     if rolar in {"abertas", "recentes", "todas"}:
         st.html(
             "<script>"
@@ -5882,38 +5878,112 @@ def pesquisa_next(tipo: str) -> str:
     return termo
 
 
-def texto_lembrete_next() -> str:
-    aviso = f"NENHUMA BAIXA NOS ÚLTIMOS {DIAS_EDICAO_BAIXA} DIAS."
-    ultima = scalar(
-        """
-        SELECT MAX(substr(CAST(data_pagamento AS TEXT), 1, 10))
+def mostrar_lembrete_next(tipo: str | None = None) -> None:
+    origem = f"next:{tipo}" if tipo in {"pagar", "receber"} else "next"
+    _botao_ultimas_baixas(origem, origem.replace(":", "_"))
+
+
+def ultimas_baixas_next(tipo: str | None = None) -> pd.DataFrame:
+    filtro = ""
+    params: list = []
+    if tipo in {"pagar", "receber"}:
+        filtro = "AND tipo = ?"
+        params.append(tipo)
+    return query(
+        f"""
+        SELECT id, tipo, codigo,
+               COALESCE(NULLIF(TRIM(historico), ''), NULLIF(TRIM(nome), '')) AS descricao,
+               quitado, COALESCE(valor_pago, 0) AS valor_pago,
+               data_pagamento AS dt_pagamento
         FROM next_lancamento
-        WHERE lower(IFNULL(quitado, '')) = 'sim'
-          AND substr(CAST(data_pagamento AS TEXT), 1, 10) <> ''
-        """
+        WHERE (
+            lower(trim(COALESCE(quitado, ''))) = 'sim'
+            OR data_pagamento IS NOT NULL
+            OR COALESCE(valor_pago, 0) > 0.004
+        )
+        {filtro}
+        ORDER BY data_pagamento DESC NULLS LAST, id DESC
+        LIMIT 20
+        """,
+        tuple(params),
     )
-    if not ultima:
-        return aviso
-    quando = pd.to_datetime(str(ultima)[:10], errors="coerce")
-    if pd.isna(quando):
-        return aviso
-    dias = (date.today() - quando.date()).days
-    if dias >= DIAS_EDICAO_BAIXA:
-        return aviso
-    if dias <= 0:
-        return "Última baixa hoje."
-    if dias == 1:
-        return "Última baixa a 1 dia."
-    return f"Última baixa a {dias} dias."
 
 
-def mostrar_lembrete_next() -> None:
-    texto = html.escape(texto_lembrete_next())
-    st.markdown(
-        "<p style='text-align:center;font-weight:700;font-size:1.05rem;margin:0.15rem 0 0.7rem'>"
-        f"{texto}</p>",
-        unsafe_allow_html=True,
-    )
+def _serie_estorno(valor_pago, quitado) -> pd.Series:
+    return pd.Series({"valor_pago": valor_pago, "quitado": quitado})
+
+
+def _linhas_ultimas_oficina(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        st.info("Nenhuma baixa encontrada.")
+        return
+    for registro in frame.itertuples(index=False):
+        conta_id = int(registro.id)
+        numero = numero_os(registro.os)
+        with st.container(border=True):
+            st.markdown(
+                f"**O.S. {numero if numero is not None else '—'}** · "
+                f"{texto_limpo(registro.nome) or 'Sem cliente'} · "
+                f"{texto_limpo(registro.descricao) or 'Sem descrição'}"
+            )
+            st.caption(
+                f"{data_br(registro.dt_pagamento) or 'sem data'} · {brl(registro.valor_pago)} · "
+                f"{'Quitada' if str(registro.quitado or '').strip().casefold() == 'sim' else 'Parcial'}"
+            )
+            editar, estornar = st.columns(2)
+            if editar.button("Editar", type="primary", width="stretch", key=f"ult_edit_of_{conta_id}"):
+                st.session_state.ultimas_lista = None
+                abrir_baixa(conta_id, True)
+                st.rerun()
+            with estornar:
+                botoes_estorno("oficina", conta_id, _serie_estorno(registro.valor_pago, registro.quitado))
+
+
+def _linhas_ultimas_next(frame: pd.DataFrame) -> None:
+    if frame.empty:
+        st.info("Nenhuma baixa encontrada.")
+        return
+    for registro in frame.itertuples(index=False):
+        conta_id = int(registro.id)
+        tipo = "A pagar" if str(registro.tipo or "").strip().casefold() == "pagar" else "A receber"
+        with st.container(border=True):
+            st.markdown(
+                f"**{tipo} {texto_limpo(registro.codigo) or '—'}** · "
+                f"{texto_limpo(registro.descricao) or 'Sem descrição'}"
+            )
+            st.caption(
+                f"{data_br(registro.dt_pagamento) or 'sem data'} · {brl(registro.valor_pago)} · "
+                f"{'Quitada' if str(registro.quitado or '').strip().casefold() == 'sim' else 'Parcial'}"
+            )
+            editar, estornar = st.columns(2)
+            if editar.button("Editar", type="primary", width="stretch", key=f"ult_edit_nx_{conta_id}"):
+                st.session_state.ultimas_lista = None
+                abrir_baixa_next(conta_id, True)
+                st.rerun()
+            with estornar:
+                botoes_estorno("next", conta_id, _serie_estorno(registro.valor_pago, registro.quitado))
+
+
+def fechar_ultimas_baixas() -> None:
+    st.session_state.ultimas_lista = None
+
+
+@st.dialog("Últimas baixas", width="large", on_dismiss=fechar_ultimas_baixas)
+def dialogo_ultimas_baixas() -> None:
+    origem = str(st.session_state.get("ultimas_lista") or "")
+    st.caption("As 20 baixas mais recentes. Editar abre a conta. Estornar devolve o valor pago e deixa a conta em aberto.")
+    if origem == "oficina":
+        _linhas_ultimas_oficina(ultimas_baixas_oficina())
+        return
+    tipo = origem.split(":", 1)[1] if origem.startswith("next:") else None
+    _linhas_ultimas_next(ultimas_baixas_next(tipo))
+
+
+def dialogos_da_visao_oficina() -> None:
+    if st.session_state.get("fin_baixa_id"):
+        dialogo_baixa()
+    elif st.session_state.get("ultimas_lista") == "oficina":
+        dialogo_ultimas_baixas()
 
 
 def _baixa_pela_linha(chave_ids: str, chave_click: str, reabrir: bool, ver: bool = False) -> None:
@@ -7784,7 +7854,7 @@ def _painel_operacao_contas(tipo: str) -> None:
         """,
         (tipo,),
     )
-    mostrar_lembrete_next()
+    mostrar_lembrete_next(tipo)
     abertas = query(
         f"""
         SELECT id, codigo, {descricao_sql} AS descricao,
@@ -8341,6 +8411,8 @@ def painel_contas_next() -> None:
         dialogo_documento_cruz()
     elif st.session_state.get("otop_numero") and not st.session_state.get("nx_cli_cliente"):
         dialogo_os_top()
+    elif str(st.session_state.get("ultimas_lista") or "").startswith("next"):
+        dialogo_ultimas_baixas()
 
 
 def abrir_financeiro_vinculado(termo: str) -> None:
@@ -8633,6 +8705,10 @@ def visao_next() -> None:
         o3.metric("Produtos abaixo do mínimo", inteiro(operacao.iat[0, 3]))
         st.caption("Pedido, nota e ordem de serviço ficam nos menus Vendas, Notas Fiscais e Ordem de Serviço.")
     origem_next()
+    if st.session_state.get("next_baixa_id"):
+        dialogo_baixa_next()
+    elif str(st.session_state.get("ultimas_lista") or "").startswith("next"):
+        dialogo_ultimas_baixas()
 
 
 def contas_next_clientes() -> pd.DataFrame:
