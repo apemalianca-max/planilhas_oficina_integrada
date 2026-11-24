@@ -1584,6 +1584,59 @@ def mostrar_baixas_pedidos(numeros: str, chave: str) -> None:
         botao_baixa_pedido(pedido, f"{chave}_{pedido}")
 
 
+def mostrar_baixa_documentos_pedido(codigo: str, detalhe: dict) -> None:
+    pedido = _chave_numero(codigo)
+    valor_pedido = valor_documento_pedido(pedido)
+    conta_pedido = conta_baixa_pedido(pedido, valor_pedido)
+    ordens = []
+    for parte in str(_texto_detalhe(detalhe.get("os_oficina")) or "").split(","):
+        numero = numero_os(parte)
+        if numero is not None and numero not in ordens:
+            ordens.append(numero)
+    st.markdown("**Valor de cada documento**")
+    st.caption("O valor mostrado é só o daquele documento. A baixa completa abre no botão.")
+    colunas = st.columns(1 + len(ordens))
+    with colunas[0]:
+        st.metric(f"Pedido {pedido}", brl(valor_pedido) if valor_pedido is not None else "—")
+        quitado = bool(conta_pedido) and str(conta_pedido["quitado"] or "").strip().casefold() == "sim"
+        if conta_pedido and st.button("Baixa do pedido", type="primary", key=f"baixa_ped_card_{pedido}"):
+            abrir_baixa_pedido(int(conta_pedido["id"]), quitado)
+        elif not conta_pedido:
+            st.caption("Sem conta de baixa deste pedido.")
+    for indice, numero in enumerate(ordens, start=1):
+        valor_os = valor_documento_os(numero)
+        conta_os = conta_baixa_os(numero, valor_os)
+        with colunas[indice]:
+            st.metric(f"O.S. {numero}", brl(valor_os) if valor_os is not None else "—")
+            if conta_os and st.button("Baixa da O.S.", type="primary", key=f"baixa_os_card_{pedido}_{numero}"):
+                st.session_state.modulo = "os"
+                st.session_state.aba = ABA_FIN
+                st.session_state.cruz_doc_id = None
+                st.session_state.nx_pedido_da_conta = False
+                st.session_state.nx_os_da_conta = False
+                quitado_os = str(conta_os["quitado"] or "").strip().casefold() == "sim"
+                abrir_baixa(int(conta_os["id"]), ver=quitado_os)
+                st.rerun()
+            elif not conta_os:
+                st.caption("Sem conta de baixa desta O.S.")
+
+
+def mostrar_cartao_pedido(codigo: str, detalhe: dict) -> None:
+    mostrar_vinculo_pedido(codigo, detalhe)
+    chave = sem_acento(_chave_numero(codigo)).replace(" ", "_")
+    with st.container(border=True):
+        st.markdown("**Vínculos**")
+        mostrar_codigos_vinculados(
+            f"ped_card_{chave}",
+            _chave_numero(codigo),
+            _texto_detalhe(detalhe.get("codorcamento")),
+            _texto_detalhe(detalhe.get("codos")),
+            _texto_detalhe(detalhe.get("os_oficina")),
+            texto_os_top(_texto_detalhe(detalhe.get("observacoes"))),
+        )
+        mostrar_baixa_documentos_pedido(codigo, detalhe)
+
+
 def mostrar_baixa_documentos_os(numero: int) -> None:
     itens = pedidos_ligados("os_oficina", str(numero))
     pedidos = []
@@ -9406,10 +9459,12 @@ def ficha_pedido(codigo: str) -> None:
         """,
         (codigo,),
     )
-    st.subheader("Pedido de venda")
+    st.subheader(f"Pedido {_chave_numero(codigo)}")
     destaque_pedido(codigo)
+    detalhe = detalhe_do_pedido(codigo)
+    if detalhe or not pecas.empty:
+        mostrar_cartao_pedido(codigo, detalhe)
     if pecas.empty:
-        detalhe = detalhe_do_pedido(codigo)
         if not detalhe:
             st.info("Pedido não encontrado.")
             return
@@ -9431,24 +9486,13 @@ def ficha_pedido(codigo: str) -> None:
                 condicao = texto_limpo(quote.iat[0, 1])
                 entrega = texto_limpo(quote.iat[0, 2])
         chave = sem_acento(codigo).replace(" ", "_")
-        mostrar_codigos_vinculados(
-            f"ped_{chave}",
-            _chave_numero(codigo),
-            orcamento_numero,
-            _texto_detalhe(detalhe.get("codos")),
-            _texto_detalhe(detalhe.get("os_oficina")),
-            texto_os_top(_texto_detalhe(detalhe.get("observacoes"))),
-        )
         st.caption(
             f"{cliente or 'Sem cliente'} · {data_br(detalhe.get('data')) or 'sem data'} · "
             f"{condicao or 'sem condição de pagamento'} · {entrega or 'sem condição de entrega'}"
         )
         if _texto_detalhe(detalhe.get("observacoes")):
             st.caption(_texto_detalhe(detalhe.get("observacoes")))
-        if detalhe.get("valor_total") is not None:
-            st.metric("Total do pedido", brl(detalhe.get("valor_total")))
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_vazio_{chave}")
-        botao_baixa_pedido(codigo, f"baixa_ped_vazio_{chave}")
         st.info("Este pedido não tem a lista de peças na carga de vendas.")
         return
     cab = pecas.iloc[0]
@@ -9487,7 +9531,6 @@ def ficha_pedido(codigo: str) -> None:
     if not notas.empty:
         nota_numero = texto_limpo(notas.iloc[0]["nota"])
         orcamento_numero = texto_limpo(notas.iloc[0]["orcamento"])
-    detalhe = detalhe_do_pedido(codigo)
     if _texto_detalhe(detalhe.get("codorcamento")):
         orcamento_numero = _texto_detalhe(detalhe.get("codorcamento"))
     if _texto_detalhe(detalhe.get("nota_fiscal")):
@@ -9518,16 +9561,7 @@ def ficha_pedido(codigo: str) -> None:
     _preparar_campos("pedido", codigo, liberado)
     with st.container(border=True):
         st.markdown("**Dados do pedido**")
-        mostrar_codigos_vinculados(
-            f"ped_{chave}",
-            _chave_numero(codigo),
-            orcamento_numero,
-            os_next,
-            os_oficina,
-            texto_os_top(observacao),
-        )
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_{chave}")
-        botao_baixa_pedido(codigo, f"baixa_ped_{chave}")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             _campo_pedido("Data emissão", data_emissao, f"ped_{chave}_emissao", campo="emissao")
@@ -9584,7 +9618,6 @@ def ficha_pedido(codigo: str) -> None:
             st.session_state.nx_editavel = False
             st.success("Pedido gravado.")
             st.rerun()
-    mostrar_vinculo_pedido(codigo, detalhe)
     st.session_state.nx_editavel = False
     painel_do_cliente(cliente, f"ped_{chave}")
     linhas = []
