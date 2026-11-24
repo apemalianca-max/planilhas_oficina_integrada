@@ -9034,6 +9034,19 @@ def ficha_pedido(codigo: str) -> None:
                    LIMIT 1
                ) AS descricao_produto,
                (
+                   SELECT p.descricao
+                   FROM next_produto p
+                   WHERE trim(COALESCE(v.cod_original, '')) <> ''
+                     AND (
+                         p.cod_original = v.cod_original
+                         OR p.cod_fabricante = v.cod_original
+                         OR p.codigo = v.cod_original
+                     )
+                     AND trim(COALESCE(p.descricao, '')) <> ''
+                   ORDER BY p.codigo
+                   LIMIT 1
+               ) AS descricao_original,
+               (
                    SELECT p.estoque
                    FROM next_produto p
                    WHERE trim(COALESCE(v.cod_fabricante, '')) <> ''
@@ -9259,7 +9272,11 @@ def ficha_pedido(codigo: str) -> None:
         linhas.append(
             {
                 "Código": codigo_item,
-                "Descrição do produto": texto_limpo(item.descricao_produto) or texto_limpo(item.produto),
+                "Descrição do produto": (
+                    texto_limpo(item.descricao_produto)
+                    or texto_limpo(item.descricao_original)
+                    or texto_limpo(item.produto)
+                ),
                 "UN": texto_limpo(item.unidade),
                 "Qtde.": qtd,
                 "Preço unitário": preco,
@@ -9331,7 +9348,7 @@ def ficha_pedido(codigo: str) -> None:
         st.caption(
             "Hora, entrega, observação, desconto, nota e total do pedido vêm da planilha de detalhes quando ela traz o campo. "
             "As linhas de serviço e os impostos não vieram nessa planilha. Estoque e local são os do cadastro atual. "
-            "Quando a linha da venda não trouxe o nome da peça, a descrição é a do cadastro do produto com o mesmo código de fabricante. "
+            "Quando a linha da venda não trouxe o nome da peça, a descrição é a do cadastro do produto com o mesmo código de fabricante ou o mesmo código original. "
         )
     if not notas.empty:
         for nota in notas.itertuples(index=False):
