@@ -2213,36 +2213,76 @@ def separar_obs_encargos(obs: str) -> tuple[str, float | None, float | None]:
     return limpo.strip(), juros, multa
 
 
-def _texto_parcela(quando, valor: float, quitou: bool) -> str:
+def _eh_linha_pagamento(texto: str) -> bool:
+    texto = texto.strip()
+    if "—" not in texto:
+        return False
+    data, _, resto = texto.partition("—")
+    data = data.strip()
+    if not resto.strip().startswith("R$"):
+        return False
+    if data == "sem data":
+        return True
+    return len(data) == 10 and data[2] == "/" and data[5] == "/"
+
+
+def linha_pagamento(quando: date | None, valor: float, quitar: bool) -> str:
     data = data_br(quando) or "sem data"
-    situacao = "quitação" if quitou else "parcial"
-    return f"Baixa {data}: {brl(valor)} ({situacao})"
+    tipo = "quitação" if quitar else "parcial"
+    return f"{data} — {brl(valor)} ({tipo})"
 
 
-def obs_com_parciais(
+def separar_historico_pagamentos(obs: str) -> tuple[str, list[str]]:
+    linhas = obs.replace("\r\n", "\n").split("\n")
+    indice = next((i for i, linha in enumerate(linhas) if linha.strip() == "Pagamentos:"), None)
+    if indice is None:
+        return obs.strip(), []
+    nota = "\n".join(linhas[:indice]).strip()
+    historico = []
+    for linha in linhas[indice + 1 :]:
+        if _eh_linha_pagamento(linha):
+            historico.append(linha.strip())
+        elif linha.strip():
+            nota = f"{nota}\n{linha.strip()}".strip()
+    return nota, historico
+
+
+def montar_obs_pagamentos(nota: str, historico: list[str]) -> str:
+    nota = nota.strip()
+    if not historico:
+        return nota
+    bloco = "Pagamentos:\n" + "\n".join(historico)
+    if nota:
+        return f"{nota}\n{bloco}"
+    return bloco
+
+
+def historico_para_obs(obs: str, ja_pago: float, data_anterior: date | None) -> str:
+    nota, historico = separar_historico_pagamentos(obs)
+    if ja_pago <= 0.004:
+        return nota
+    if not historico:
+        historico = [linha_pagamento(data_anterior, ja_pago, False)]
+    return montar_obs_pagamentos(nota, historico)
+
+
+def obs_com_novo_pagamento(
     obs: str,
-    linha: pd.Series,
-    valor_desta: float,
-    quando,
+    *,
     ja_pago: float,
+    data_anterior: date | None,
+    pago_desta: float,
+    data_nova: date | None,
     quitar: bool,
     reabrir: bool,
 ) -> str:
-    if reabrir or ja_pago <= 0.004 or valor_desta <= 0.004:
-        return obs
-    texto = (obs or "").strip()
-    tem_historico = any(
-        linha.startswith("Baixa ") and linha.endswith(("(parcial)", "(quitação)"))
-        for linha in texto.splitlines()
-    )
-    novas = []
-    if not tem_historico:
-        novas.append(_texto_parcela(linha.get("dt_pagamento"), ja_pago, False))
-    novas.append(_texto_parcela(quando, valor_desta, quitar))
-    for nova in novas:
-        if nova not in texto:
-            texto = f"{texto}\n{nova}".strip() if texto else nova
-    return texto
+    if reabrir or ja_pago <= 0.004 or pago_desta <= 0.004:
+        return obs.strip()
+    nota, historico = separar_historico_pagamentos(obs)
+    if not historico:
+        historico = [linha_pagamento(data_anterior, ja_pago, False)]
+    historico.append(linha_pagamento(data_nova, pago_desta, quitar))
+    return montar_obs_pagamentos(nota, historico)
 
 
 def obs_com_encargos(obs: str, juros: float, multa: float, gravar_marca: bool) -> str | None:
@@ -2312,6 +2352,7 @@ def fechar_baixa() -> None:
     st.session_state.fin_baixa_id = None
     st.session_state.fin_baixa_reabrir = False
     st.session_state.fin_baixa_ver = False
+    st.session_state.baixa_estorno = None
 
 
 def _sync_data_pagamento(conta_id: int) -> None:
@@ -2344,6 +2385,7 @@ def gravar_conta_baixa(
     quando: date | None,
     obs: str,
     quitar: bool,
+    estorno: bool = False,
 ) -> None:
     tem_colunas = garantir_encargos()
     pagamento = None if quando is None else quando.isoformat()
@@ -2403,16 +2445,97 @@ def gravar_conta_baixa(
         )
         os_num = texto_banco(antes["os"]) or "sem número"
         cliente = texto_banco(antes["nome"]) or "sem cliente"
-        situacao = "quitada" if quitar else "parcial"
-        registrar_log(
-            "Baixa",
-            (
+        if estorno:
+            evento = "Estorno"
+            detalhe = (
+                f"OS {os_num}, {cliente}, conta {int(conta_id)}: estorno da baixa, "
+                f"valor que estava pago {brl(antes.get('valor_pago'))}. A conta voltou a ficar em aberto."
+            )
+        else:
+            evento = "Baixa"
+            situacao = "quitada" if quitar else "parcial"
+            detalhe = (
                 f"OS {os_num}, {cliente}, conta {int(conta_id)}: baixa {situacao}, "
                 f"valor pago {brl(pago)}, juros {brl(juros)}, multa {brl(multa)}, "
                 f"pagamento em {data_br(pagamento) or 'sem data'}."
-            ),
-            conn=conn,
+            )
+        registrar_log(evento, detalhe, conn=conn)
+
+
+def _obs_sem_pagamentos(obs: str) -> str:
+    limpo, _, _ = separar_obs_encargos(obs)
+    nota, _ = separar_historico_pagamentos(limpo)
+    return nota
+
+
+def estornar_baixa_oficina(conta_id: int) -> None:
+    linha = buscar_conta(int(conta_id))
+    if linha is None:
+        return
+    gravar_conta_baixa(
+        int(conta_id),
+        pago=0,
+        juros=0,
+        multa=0,
+        quando=None,
+        obs=_obs_sem_pagamentos(texto_banco(linha["obs_conta"])),
+        quitar=False,
+        estorno=True,
+    )
+
+
+def estornar_baixa_next(conta_id: int) -> None:
+    linha = buscar_next(int(conta_id))
+    if linha is None:
+        return
+    gravar_next_baixa(
+        int(conta_id),
+        pago=0,
+        juros=0,
+        multa=0,
+        quando=None,
+        obs=_obs_sem_pagamentos(texto_banco(linha["obs_conta"])),
+        quitar=False,
+        estorno=True,
+    )
+
+
+def conta_tem_baixa(linha: pd.Series) -> bool:
+    quitado = str(linha.get("quitado") or "").strip().casefold() == "sim"
+    return valor_banco(linha.get("valor_pago")) > 0.004 or quitado
+
+
+def botoes_estorno(origem: str, conta_id: int, linha: pd.Series) -> None:
+    if not conta_tem_baixa(linha):
+        return
+    if not usuario_admin():
+        st.caption("Somente o administrador pode estornar a baixa parcial ou completa.")
+        return
+    chave = f"{origem}_{int(conta_id)}"
+    if st.session_state.get("baixa_estorno") == chave:
+        st.warning(
+            "Estornar esta baixa? O valor pago, a data e a lista de pagamentos saem da observação. "
+            "A conta volta a ficar em aberto, seja a baixa parcial ou completa."
         )
+        confirma, cancela = st.columns(2)
+        if confirma.button("Confirmar estorno", type="primary", width="stretch", key=f"ok_est_{chave}"):
+            if origem == "next":
+                estornar_baixa_next(int(conta_id))
+                fechar_baixa_next()
+            else:
+                estornar_baixa_oficina(int(conta_id))
+                fechar_baixa()
+            st.session_state.baixa_estorno = None
+            st.session_state.baixa_aviso_texto = "Baixa estornada. A conta voltou a ficar em aberto."
+            st.cache_data.clear()
+            st.rerun()
+        if cancela.button("Cancelar", width="stretch", key=f"no_est_{chave}"):
+            st.session_state.baixa_estorno = None
+            st.rerun()
+        return
+    if st.button("Estornar baixa", width="stretch", key=f"est_{chave}"):
+        st.session_state.baixa_estorno = chave
+        st.rerun()
 
 
 def _estilo_documento() -> str:
@@ -2656,6 +2779,8 @@ def _preparar_form_baixa(conta_id: int, linha: pd.Series, reabrir: bool) -> None
     if not tem_salvo:
         juros, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    if not reabrir:
+        obs = historico_para_obs(obs, valor_banco(linha["valor_pago"]), data_iso(linha["dt_pagamento"]))
     st.session_state[f"bx_juros_{conta_id}"] = float(juros)
     st.session_state[f"bx_multa_{conta_id}"] = float(multa)
     st.session_state[f"bx_obs_{conta_id}"] = obs
@@ -2690,14 +2815,14 @@ def _salvar_form_baixa(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
     if pago_total > 0 and quando is None:
         st.error("Informe a data do pagamento.")
         return
-    obs = obs_com_parciais(
+    obs = obs_com_novo_pagamento(
         texto_banco(st.session_state.get(f"bx_obs_{conta_id}")),
-        linha,
-        pago_campo,
-        quando,
-        valor_banco(linha["valor_pago"]),
-        quitar,
-        reabrir,
+        ja_pago=valor_banco(linha["valor_pago"]),
+        data_anterior=data_iso(linha["dt_pagamento"]),
+        pago_desta=pago_campo,
+        data_nova=quando,
+        quitar=quitar,
+        reabrir=reabrir,
     )
     gravar_conta_baixa(
         conta_id,
@@ -2734,6 +2859,7 @@ def dialogo_baixa() -> None:
         st.subheader("Documento da baixa")
         _ficha_conta(linha, dias)
         mostrar_documento_baixa(linha, f"bx_doc_{conta_id}")
+        botoes_estorno("oficina", int(conta_id), linha)
         if st.button("Reabrir baixa", type="primary", width="stretch", key=f"bx_reabrir_doc_{conta_id}"):
             st.session_state.fin_baixa_reabrir = True
             st.session_state.fin_baixa_ver = False
@@ -2782,12 +2908,17 @@ def dialogo_baixa() -> None:
         key=f"bx_data_{conta_id}",
         disabled=not liberado,
     )
-    if valor_banco(linha["valor_pago"]) > 0 and not reabrir:
+    if valor_banco(linha["valor_pago"]) > 0.004 and not reabrir:
         st.caption(
-            "A partir desta baixa, a observação passa a listar cada pagamento com a data e o valor, "
+            "A partir desta baixa, a observação lista cada pagamento com a data e o valor, "
             "desde a primeira parcial até a quitação."
         )
-    st.text_area("Obs", key=f"bx_obs_{conta_id}", height=120, disabled=not liberado)
+    st.text_area(
+        "Obs",
+        key=f"bx_obs_{conta_id}",
+        height=140 if valor_banco(linha["valor_pago"]) > 0.004 else 80,
+        disabled=not liberado,
+    )
     juros, multa, pago_total, devido = _totais_baixa(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     r1, r2, r3 = st.columns(3)
@@ -2798,6 +2929,7 @@ def dialogo_baixa() -> None:
     pode_parcial = pago_total + 0.004 < devido and (
         valor_banco(st.session_state.get(f"bx_pago_{conta_id}")) > 0 or reabrir
     )
+    botoes_estorno("oficina", int(conta_id), linha)
     b1, b2 = st.columns(2)
     if b1.button("Salvar baixa", type="primary", width="stretch", key=f"bx_salvar_{conta_id}", disabled=not (liberado and pode_quitar)):
         _salvar_form_baixa(linha, int(conta_id), reabrir, True)
@@ -6925,6 +7057,7 @@ def fechar_baixa_next() -> None:
     st.session_state.next_baixa_id = None
     st.session_state.next_baixa_reabrir = False
     st.session_state.next_baixa_ver = False
+    st.session_state.baixa_estorno = None
 
 
 def buscar_next(conta_id: int) -> pd.Series | None:
@@ -6986,6 +7119,8 @@ def _preparar_baixa_next(conta_id: int, linha: pd.Series, reabrir: bool) -> None
     elif _conta_a_pagar(linha):
         juros = 0.0
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    if not reabrir:
+        obs = historico_para_obs(obs, valor_banco(linha["valor_pago"]), data_iso(linha["dt_pagamento"]))
     st.session_state[f"nx_juros_{conta_id}"] = float(juros)
     st.session_state[f"nx_multa_{conta_id}"] = float(multa)
     st.session_state[f"nx_obs_{conta_id}"] = obs
@@ -7013,6 +7148,7 @@ def gravar_next_baixa(
     quando: date | None,
     obs: str,
     quitar: bool,
+    estorno: bool = False,
 ) -> None:
     pagamento = None if quando is None else quando.isoformat()
     quitado = "Sim" if quitar else "Nao"
@@ -7077,17 +7213,21 @@ def gravar_next_baixa(
         )
         codigo = texto_banco(antes["codigo"]) or "sem código"
         cliente = texto_banco(antes["nome"]) or texto_banco(antes["historico"]) or "sem nome"
-        situacao = "quitada" if quitar else "parcial"
-        registrar_log(
-            "Baixa",
-            (
+        if estorno:
+            evento = "Estorno"
+            detalhe = (
+                f"Código {codigo}, {cliente}, lançamento {int(conta_id)}: estorno da baixa, "
+                f"valor que estava pago {brl(antes.get('valor_pago'))}. A conta voltou a ficar em aberto."
+            )
+        else:
+            evento = "Baixa"
+            situacao = "quitada" if quitar else "parcial"
+            detalhe = (
                 f"Código {codigo}, {cliente}, lançamento {int(conta_id)}: baixa {situacao}, "
                 f"valor pago {brl(pago)}, juros {brl(juros)}, multa {brl(multa)}, "
                 f"pagamento em {data_br(pagamento) or 'sem data'}."
-            ),
-            modulo=MODULO_PV,
-            conn=conn,
-        )
+            )
+        registrar_log(evento, detalhe, modulo=MODULO_PV, conn=conn)
 
 
 def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: bool) -> None:
@@ -7107,14 +7247,14 @@ def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
     if pago_total > 0 and quando is None:
         st.error("Informe a data do pagamento.")
         return
-    obs = obs_com_parciais(
+    obs = obs_com_novo_pagamento(
         texto_banco(st.session_state.get(f"nx_obs_{conta_id}")),
-        linha,
-        pago_campo,
-        quando,
-        valor_banco(linha["valor_pago"]),
-        quitar,
-        reabrir,
+        ja_pago=valor_banco(linha["valor_pago"]),
+        data_anterior=data_iso(linha["dt_pagamento"]),
+        pago_desta=pago_campo,
+        data_nova=quando,
+        quitar=quitar,
+        reabrir=reabrir,
     )
     gravar_next_baixa(
         conta_id,
@@ -7184,6 +7324,7 @@ def dialogo_baixa_next() -> None:
         st.subheader("Documento da baixa")
         _ficha_next(linha, dias, mostrar_baixa=True)
         mostrar_documento_baixa(linha, f"nx_doc_{conta_id}")
+        botoes_estorno("next", int(conta_id), linha)
         if st.button("Reabrir baixa", type="primary", width="stretch", key=f"nx_reabrir_doc_{conta_id}"):
             st.session_state.next_baixa_reabrir = True
             st.session_state.next_baixa_ver = False
@@ -7244,12 +7385,17 @@ def dialogo_baixa_next() -> None:
         disabled=not liberado,
     )
     p2.date_input("Data do pagamento", format="DD/MM/YYYY", key=f"nx_data_{conta_id}", disabled=not liberado)
-    if valor_banco(linha["valor_pago"]) > 0 and not reabrir:
+    if valor_banco(linha["valor_pago"]) > 0.004 and not reabrir:
         st.caption(
-            "A partir desta baixa, a observação passa a listar cada pagamento com a data e o valor, "
+            "A partir desta baixa, a observação lista cada pagamento com a data e o valor, "
             "desde a primeira parcial até a quitação."
         )
-    st.text_area("Obs", key=f"nx_obs_{conta_id}", height=120, disabled=not liberado)
+    st.text_area(
+        "Obs",
+        key=f"nx_obs_{conta_id}",
+        height=140 if valor_banco(linha["valor_pago"]) > 0.004 else 80,
+        disabled=not liberado,
+    )
     juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
     if pagar:
@@ -7267,6 +7413,7 @@ def dialogo_baixa_next() -> None:
     pode_parcial = pago_total + 0.004 < devido and (
         valor_banco(st.session_state.get(f"nx_pago_{conta_id}")) > 0 or reabrir
     )
+    botoes_estorno("next", int(conta_id), linha)
     b1, b2 = st.columns(2)
     if b1.button("Salvar baixa", type="primary", width="stretch", key=f"nx_salvar_{conta_id}", disabled=not (liberado and pode_quitar)):
         _salvar_baixa_next(linha, int(conta_id), reabrir, True)
