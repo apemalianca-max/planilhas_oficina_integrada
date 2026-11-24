@@ -4031,16 +4031,51 @@ def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: s
     st.session_state.repo_ok = f"Lançado: {descricao_com_observacao(descricao, observacao)} ({rotulo_marcacao(marcacao)})"
 
 
+def _quantidade_planilha(valor) -> float | None:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None
+    if isinstance(valor, str):
+        texto = valor.strip().replace(",", ".")
+        if not texto:
+            return None
+        try:
+            return float(texto)
+        except ValueError:
+            return None
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(numero):
+        return None
+    return numero
+
+
 def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> int:
     antes = {}
     for linha in original.itertuples(index=False):
-        antes[int(linha.linha)] = (_texto_planilha(linha.situacao), _texto_planilha(linha.loja))
+        antes[int(linha.linha)] = (
+            _texto_planilha(linha.situacao),
+            _quantidade_planilha(linha.quantidade),
+            _texto_planilha(linha.loja),
+        )
     alterados = []
     for item in editado.itertuples(index=False):
         numero = int(item.Linha)
-        novo = (_texto_planilha(item.Pedido), _texto_planilha(item.Fornecedor))
-        if antes.get(numero) != novo:
-            alterados.append({"linha": numero, "situacao": novo[0], "loja": novo[1]})
+        novo = (
+            _texto_planilha(item.Pedido),
+            _quantidade_planilha(item.Qtde),
+            _texto_planilha(item.Fornecedor),
+        )
+        anterior = antes.get(numero)
+        if anterior is None or anterior == novo:
+            continue
+        if anterior[1] is not None and novo[1] is not None and round(anterior[1], 2) == round(novo[1], 2):
+            if anterior[0] == novo[0] and anterior[2] == novo[2]:
+                continue
+        alterados.append(
+            {"linha": numero, "situacao": novo[0], "quantidade": novo[1], "loja": novo[2]}
+        )
     if not alterados:
         return 0
     with engine().begin() as conn:
@@ -4048,7 +4083,7 @@ def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> i
             text(
                 """
                 UPDATE painel_pedido_reposicao
-                SET situacao = :situacao, loja = :loja
+                SET situacao = :situacao, quantidade = :quantidade, loja = :loja
                 WHERE linha = :linha
                 """
             ),
@@ -4094,7 +4129,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         st.query_params.clear()
         st.rerun()
     st.subheader("Lançar produto")
-    st.caption("Clique em Reposição ou Vendido para gravar. Pedido e fornecedor ficam em branco para digitar na lista.")
+    st.caption("Clique em Reposição ou Vendido para gravar. Pedido, quantidade e fornecedor ficam para digitar na lista.")
     with st.form("lancar_produto_pedido", clear_on_submit=True, border=False):
         campo_codigo, campo_descricao = st.columns(2)
         codigo = campo_codigo.text_input("Código do produto", placeholder="INSERIR CÓDIGO")
@@ -4181,8 +4216,8 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
             "Descrição",
             "RE/VE",
             "Pedido",
-            "Fornecedor",
             "Qtde",
+            "Fornecedor",
             "Preço",
             "Marca",
             "Preço 2",
@@ -4200,7 +4235,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         hide_index=True,
         height=640,
         num_rows="fixed",
-        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Fornecedor", "Excluir"}],
+        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Qtde", "Fornecedor", "Excluir"}],
         column_config={
             "Excluir": st.column_config.ButtonColumn(
                 "Excluir",
@@ -4211,7 +4246,7 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
                 key="repo_click_excluir",
             ),
             "Linha": st.column_config.NumberColumn("Linha", width="small"),
-            "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f"),
+            "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f", min_value=0),
             "Pedido": st.column_config.TextColumn("Pedido"),
             "Fornecedor": st.column_config.TextColumn("Fornecedor"),
             "Preço": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
@@ -4219,16 +4254,16 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
             "Preço 3": st.column_config.NumberColumn("Preço 3", format="R$ %.2f"),
             "Preço 4": st.column_config.NumberColumn("Preço 4", format="R$ %.2f"),
         },
-        key=f"editor_pedido_reposicao_{int(st.session_state.get('repo_grade_versao') or 0)}",
+        key=f"editor_pedido_reposicao_qtde_{int(st.session_state.get('repo_grade_versao') or 0)}",
         alt="Itens da planilha de pedidos",
     )
-    if st.button("Gravar pedido e fornecedor", type="primary", key="gravar_pedido_fornecedor"):
+    if st.button("Gravar pedido, quantidade e fornecedor", type="primary", key="gravar_pedido_fornecedor"):
         gravados = gravar_pedido_fornecedor(editado, visivel)
         if gravados:
             st.session_state.repo_aviso = ""
             st.rerun()
         else:
-            st.info("Nenhuma alteração de pedido ou fornecedor para gravar.")
+            st.info("Nenhuma alteração de pedido, quantidade ou fornecedor para gravar.")
 
 
 def tela_acesso() -> None:
