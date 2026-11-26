@@ -5791,6 +5791,20 @@ def destacar_obs() -> None:
           -webkit-text-fill-color: #083526 !important;
           opacity: 1 !important;
         }
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button,
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button p,
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button span {
+          background-color: #9f1239 !important;
+          border-color: #9f1239 !important;
+          color: #ffffff !important;
+        }
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button:hover,
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button:hover p,
+        [class*="st-key-cruzbtn_"][class*="_aberto"] button:hover span {
+          background-color: #881337 !important;
+          border-color: #881337 !important;
+          color: #ffffff !important;
+        }
         </style>
         """
     )
@@ -6849,6 +6863,7 @@ def _titulo_next(row) -> dict:
         "saldo": round(max(0.0, valor - pago), 2),
         "quitado": str(row.quitado or "").strip().casefold() == "sim",
         "data": data_iso(row.dt_pagamento),
+        "vencimento": row.vencimento,
     }
 
 
@@ -6868,6 +6883,7 @@ def _titulo_oficina(row) -> dict:
         "saldo": round(max(0.0, valor - pago), 2),
         "quitado": str(row.quitado or "").strip().casefold() == "sim",
         "data": data_iso(row.dt_pagamento),
+        "vencimento": row.vencimento,
     }
 
 
@@ -6881,6 +6897,7 @@ def titulos_do_pedido(pedido: str) -> list[dict]:
                COALESCE(valor_liquido, 0) AS valor,
                COALESCE(valor_pago, 0) AS valor_pago,
                quitado,
+               vencimento,
                data_pagamento AS dt_pagamento
         FROM next_lancamento
         WHERE tipo = 'receber'
@@ -6902,6 +6919,7 @@ def titulos_da_os_oficina(numero: str) -> list[dict]:
                COALESCE(valor, 0) AS valor,
                COALESCE(valor_pago, 0) AS valor_pago,
                quitado,
+               vencimento,
                dt_pagamento
         FROM oficina_financeiro
         WHERE lower(COALESCE(tipo, '')) = 'receita'
@@ -7005,6 +7023,7 @@ def _linhas_cruzamento(titulos: list[dict], total: float | None, atual: dict | N
                     "id": item["id"],
                     "numero": item["numero"],
                     "quitado": item["quitado"],
+                    "dias": dias_em_atraso(item.get("vencimento"), "Sim" if item["quitado"] else "Nao"),
                 }
             )
 
@@ -7177,11 +7196,23 @@ def abrir_titulo_cruzado(origem: str, conta_id: int, quitado: bool) -> None:
     st.rerun()
 
 
+def rotulo_botao_documento(item: dict) -> str:
+    numero = item.get("numero") or item.get("id")
+    if item.get("quitado"):
+        return f"Documento {numero} (quitado)"
+    dias = item.get("dias")
+    if isinstance(dias, int) and dias > 0:
+        prazo = "1 dia vencido" if dias == 1 else f"{dias} dias vencidos"
+        return f"Documento {numero} (aberto - {prazo})"
+    return f"Documento {numero} (aberto)"
+
+
 def mostrar_botoes_cruzamento(refs: list[dict], chave: str) -> None:
     for item in refs:
+        aberto = not bool(item.get("quitado"))
         if st.button(
-            f"Documento {item['numero']}",
-            key=f"cruzbtn_{chave}_{item['origem']}_{item['id']}",
+            rotulo_botao_documento(item),
+            key=f"cruzbtn_{chave}_{item['origem']}_{item['id']}_{'aberto' if aberto else 'quitado'}",
             width="stretch",
         ):
             abrir_titulo_cruzado(item["origem"], int(item["id"]), bool(item["quitado"]))
