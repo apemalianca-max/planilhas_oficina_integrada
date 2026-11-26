@@ -6511,6 +6511,121 @@ def rotulos_os_pedido(pedidos: list[str]) -> tuple[list[str], list[str], list[st
     return os_next, os_oficina, os_top
 
 
+def _chaves_unicas(numeros: list[str]) -> list[str]:
+    chaves = []
+    for numero in numeros:
+        for parte in _numeros_vinculo(str(numero or "")):
+            if parte not in chaves:
+                chaves.append(parte)
+    return chaves
+
+
+def _grupos_aberto(frame: pd.DataFrame, coluna: str) -> dict[str, list[dict]]:
+    grupos: dict[str, list[dict]] = {}
+    if frame is None or frame.empty:
+        return grupos
+    for row in frame.itertuples(index=False):
+        chave = _chave_numero(getattr(row, coluna))
+        if not chave:
+            continue
+        valor = round(valor_banco(row.valor), 2)
+        pago = round(valor_banco(row.valor_pago), 2)
+        grupos.setdefault(chave, []).append(
+            {
+                "origem": "next",
+                "id": int(row.id),
+                "valor": valor,
+                "pago": pago,
+                "saldo": round(max(0.0, valor - pago), 2),
+                "quitado": str(row.quitado or "").strip().casefold() == "sim",
+            }
+        )
+    return grupos
+
+
+def mapa_aberto_pedidos(numeros: list[str]) -> dict[str, float]:
+    chaves = _chaves_unicas(numeros)
+    if not chaves:
+        return {}
+    marcas = ", ".join("?" for _ in chaves)
+    frame = query(
+        f"""
+        SELECT id,
+               {_PEDIDO_NO_HISTORICO} AS pedido,
+               COALESCE(valor_liquido, 0) AS valor,
+               COALESCE(valor_pago, 0) AS valor_pago,
+               quitado
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+          AND {_PEDIDO_NO_HISTORICO} IN ({marcas})
+        """,
+        tuple(chaves),
+    )
+    garantir_pedido_detalhe()
+    totais = query(
+        f"""
+        SELECT codvenda, valor_total
+        FROM next_pedido_detalhe
+        WHERE codvenda IN ({marcas})
+        """,
+        tuple(chaves),
+    )
+    total_por: dict[str, float] = {}
+    if not totais.empty:
+        for codigo, valor in zip(totais["codvenda"], totais["valor_total"], strict=True):
+            chave = _chave_numero(codigo)
+            numero = _numero_documento(valor)
+            if chave and numero:
+                total_por[chave] = numero
+    saida = {}
+    for chave, titulos in _grupos_aberto(frame, "pedido").items():
+        _, aberto = _pago_aberto_titulos(titulos, total_por.get(chave))
+        saida[chave] = aberto
+    return saida
+
+
+def mapa_aberto_os_oficina(numeros: list[str]) -> dict[str, float]:
+    chaves = _chaves_unicas(numeros)
+    if not chaves:
+        return {}
+    marcas = ", ".join("?" for _ in chaves)
+    frame = query(
+        f"""
+        SELECT id,
+               ltrim(CAST(os AS text), '0') AS os,
+               COALESCE(valor, 0) AS valor,
+               COALESCE(valor_pago, 0) AS valor_pago,
+               quitado
+        FROM oficina_financeiro
+        WHERE lower(COALESCE(tipo, '')) = 'receita'
+          AND ltrim(CAST(os AS text), '0') IN ({marcas})
+        """,
+        tuple(chaves),
+    )
+    saida = {}
+    for chave, titulos in _grupos_aberto(frame, "os").items():
+        _, aberto = _pago_aberto_titulos(titulos, None)
+        saida[chave] = aberto
+    return saida
+
+
+def rotulo_numero_aberto(texto: str, mapa: dict[str, float]) -> str:
+    partes = []
+    for parte in str(texto or "").split(","):
+        numero = _chave_numero(parte)
+        if not numero:
+            continue
+        if numero in mapa:
+            partes.append(f"{numero} · {brl(mapa[numero])}")
+        else:
+            partes.append(numero)
+    return ", ".join(partes)
+
+
+def com_aberto(numeros: list[str], mapa: dict[str, float]) -> list[str]:
+    return [rotulo_numero_aberto(numero, mapa) for numero in numeros]
+
+
 def abrir_os_next_painel(numero: str) -> None:
     codigo = codigo_registrado("next_os", "codigo", numero)
     if not codigo:
@@ -7562,6 +7677,8 @@ def dialogo_notas_cliente() -> None:
     st.session_state.nx_os_next_notas = os_next
     st.session_state.nx_os_oficina_notas = os_oficina
     st.session_state.nx_os_top_notas = os_top
+    pedidos_tela = com_aberto(pedidos, mapa_aberto_pedidos(pedidos))
+    os_oficina_tela = com_aberto(os_oficina, mapa_aberto_os_oficina(os_oficina))
     mostrar_aviso_os_top("notas")
     visivel = pd.DataFrame(
         {
@@ -7570,9 +7687,9 @@ def dialogo_notas_cliente() -> None:
             "Vencimento": linhas["vencimento"].map(lambda valor: data_br(valor) or "—"),
             "Situação": ["Vencida" if flag else "A vencer" for flag in linhas["eh_vencida"]],
             "Valor da dívida": linhas["divida"],
-            "Pedido": pedidos,
+            "Pedido": pedidos_tela,
             "O.S. NeXT": os_next,
-            "O.S. Oficina": os_oficina,
+            "O.S. Oficina": os_oficina_tela,
             "O. TOP": links_os_top(os_top),
             "Baixar": ["Baixar"] * len(linhas),
         }
@@ -7590,8 +7707,8 @@ def dialogo_notas_cliente() -> None:
             "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
             "Pedido": st.column_config.ButtonColumn(
                 "Pedido",
-                width="small",
-                help="Abre o pedido de venda citado no histórico",
+                width=150,
+                help="Abre o pedido. O valor ao lado é o que ainda está em aberto nesse pedido.",
                 on_click=click_pedido_notas,
                 key="nx_click_pedido_notas",
             ),
@@ -7604,8 +7721,8 @@ def dialogo_notas_cliente() -> None:
             ),
             "O.S. Oficina": st.column_config.ButtonColumn(
                 "O.S. Oficina",
-                width="small",
-                help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+                width=160,
+                help="Abre a O.S. da Oficina Integrada. O valor ao lado é o que ainda está em aberto nessa ordem.",
                 on_click=_clique_os("nx_os_oficina_notas", "nx_click_os_oficina_notas", True),
                 key="nx_click_os_oficina_notas",
             ),
@@ -7703,6 +7820,8 @@ def listar_next_abertas(
         st.session_state[f"{chave_ids}_os_next"] = os_next
         st.session_state[f"{chave_ids}_os_oficina"] = os_oficina
         st.session_state[f"{chave_ids}_os_top"] = os_top
+    pedidos_tela = com_aberto(pedidos, mapa_aberto_pedidos(pedidos))
+    os_oficina_tela = com_aberto(os_oficina, mapa_aberto_os_oficina(os_oficina)) if os_oficina else os_oficina
     colunas = {
         "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
         "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -7717,12 +7836,12 @@ def listar_next_abertas(
                 strict=True,
             )
         ],
-        "Pedido": pedidos,
+        "Pedido": pedidos_tela,
         "Baixar": ["Baixar"] * len(contas),
     }
     if mostrar_vinculo:
         colunas["O.S. NeXT"] = os_next
-        colunas["O.S. Oficina"] = os_oficina
+        colunas["O.S. Oficina"] = os_oficina_tela
         colunas["O. TOP"] = links_os_top(os_top)
         baixar = colunas.pop("Baixar")
         colunas["Baixar"] = baixar
@@ -7743,7 +7862,7 @@ def listar_next_abertas(
             colunas = {
                 **{chave: colunas[chave] for chave in list(colunas) if chave not in {"Baixar", "O.S. NeXT", "O.S. Oficina", "O. TOP"}},
                 "O.S. NeXT": os_next,
-                "O.S. Oficina": os_oficina,
+                "O.S. Oficina": os_oficina_tela,
                 "O. TOP": links_os_top(os_top),
                 "Baixar": colunas["Baixar"],
             }
@@ -7762,8 +7881,8 @@ def listar_next_abertas(
         "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width="small"),
         "Pedido": st.column_config.ButtonColumn(
             "Pedido",
-            width="small",
-            help="Abre o pedido de venda citado na descrição",
+            width=150,
+            help="Abre o pedido. O valor ao lado é o que ainda está em aberto nesse pedido.",
             on_click=_clique_pedido(chave_pedido, chave_pedido_click),
             key=chave_pedido_click,
         ),
@@ -7785,8 +7904,8 @@ def listar_next_abertas(
         )
         config["O.S. Oficina"] = st.column_config.ButtonColumn(
             "O.S. Oficina",
-            width="small",
-            help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+            width=160,
+            help="Abre a O.S. da Oficina Integrada. O valor ao lado é o que ainda está em aberto nessa ordem.",
             on_click=_clique_os(f"{chave_ids}_os_oficina", f"{chave_ids}_os_oficina_click", True),
             key=f"{chave_ids}_os_oficina_click",
         )
@@ -7836,12 +7955,13 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
     st.session_state.nx_ids_recentes = [int(valor) for valor in contas["id"].tolist()]
     pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
     st.session_state.nx_pedidos_recentes = pedidos
+    pedidos_tela = com_aberto(pedidos, mapa_aberto_pedidos(pedidos))
     colunas = {
         "Código": contas["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
         "Descrição": contas["descricao"].map(lambda valor: texto_limpo(valor) or "—"),
         "Pagamento": contas["dt_pagamento"].map(lambda valor: data_br(valor) or "—"),
         "Valor pago": pd.to_numeric(contas["valor_pago"], errors="coerce"),
-        "Pedido": pedidos,
+        "Pedido": pedidos_tela,
         "Ver documento": ["Ver documento"] * len(contas),
         "Reabrir baixa": ["Reabrir baixa"] * len(contas),
     }
@@ -7855,9 +7975,9 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             "Descrição": colunas["Descrição"],
             "Pagamento": colunas["Pagamento"],
             "Valor pago": colunas["Valor pago"],
-            "Pedido": pedidos,
+            "Pedido": pedidos_tela,
             "O.S. NeXT": os_next,
-            "O.S. Oficina": os_oficina,
+            "O.S. Oficina": com_aberto(os_oficina, mapa_aberto_os_oficina(os_oficina)),
             "O. TOP": links_os_top(os_top),
             "Ver documento": colunas["Ver documento"],
             "Reabrir baixa": colunas["Reabrir baixa"],
@@ -7870,8 +7990,8 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
         "Valor pago": st.column_config.NumberColumn("Valor pago", format="R$ %.2f", width="small"),
         "Pedido": st.column_config.ButtonColumn(
             "Pedido",
-            width="small",
-            help="Abre o pedido de venda citado na descrição",
+            width=150,
+            help="Abre o pedido. O valor ao lado é o que ainda está em aberto nesse pedido.",
             on_click=click_pedido_recentes,
             key="nx_click_pedido_recentes",
         ),
@@ -7899,8 +8019,8 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
         )
         config["O.S. Oficina"] = st.column_config.ButtonColumn(
             "O.S. Oficina",
-            width="small",
-            help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+            width=160,
+            help="Abre a O.S. da Oficina Integrada. O valor ao lado é o que ainda está em aberto nessa ordem.",
             on_click=_clique_os("nx_os_oficina_recentes", "nx_click_os_oficina_recentes", True),
             key="nx_click_os_oficina_recentes",
         )
@@ -8968,6 +9088,7 @@ def painel_contas_next() -> None:
         st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
         st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
         st.session_state.nx_pedidos_lancamento = pedidos
+        pedidos_tela = com_aberto(pedidos, mapa_aberto_pedidos(pedidos))
         grade = {
             "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
             "Duplicata": frame["duplicata"].map(lambda valor: texto_limpo(valor) or "—"),
@@ -8996,7 +9117,7 @@ def painel_contas_next() -> None:
             "Data pagto.": frame["data_pagamento"].map(data_br),
             "Valor da dívida": divida,
             "Valor da Baixa": pago.where(pago > 0, baixa_planilha),
-            "Pedido": pedidos,
+            "Pedido": pedidos_tela,
         }
         if tipo == "receber":
             os_next, os_oficina, os_top = rotulos_os_pedido(pedidos)
@@ -9004,13 +9125,15 @@ def painel_contas_next() -> None:
             st.session_state.nx_os_oficina_lancamento = os_oficina
             st.session_state.nx_os_top_lancamento = os_top
             grade["O.S. NeXT"] = os_next
-            grade["O.S. Oficina"] = os_oficina
+            grade["O.S. Oficina"] = com_aberto(os_oficina, mapa_aberto_os_oficina(os_oficina))
             grade["O. TOP"] = os_top
         grade["Documento"] = ["Ver documento" if flag else "Baixar" for flag in quitado_flag]
         visivel = pd.DataFrame(grade)
         st.caption(
             "Valor da dívida é o valor do lançamento. Valor da Baixa é o valor pago neste painel. "
-            "Pedido abre o pedido de venda. Baixar abre juros, multa e o pagamento. "
+            "Pedido abre o pedido de venda e, ao lado do número, mostra o valor ainda em aberto desse pedido. "
+            "O mesmo vale para a O.S. da Oficina Integrada. "
+            "Baixar abre juros, multa e o pagamento. "
                 "Ver documento abre a ficha do que já foi baixado."
                 + (
                     " O.S. NeXT abre a ordem no NeXT. O.S. Oficina abre a ordem na Oficina Integrada. "
@@ -9052,8 +9175,8 @@ def painel_contas_next() -> None:
                 "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f", width=82),
                 "Pedido": st.column_config.ButtonColumn(
                     "Pedido",
-                    width=60,
-                    help="Abre o pedido de venda citado no histórico",
+                    width=150,
+                    help="Abre o pedido. O valor ao lado é o que ainda está em aberto nesse pedido.",
                     on_click=click_pedido_lancamento,
                     key="nx_click_pedido_grade",
                 ),
@@ -9066,8 +9189,8 @@ def painel_contas_next() -> None:
                 ),
                 "O.S. Oficina": st.column_config.ButtonColumn(
                     "O.S. Oficina",
-                    width=74,
-                    help="Abre a ordem de serviço da Oficina Integrada citada na observação do pedido",
+                    width=160,
+                    help="Abre a O.S. da Oficina Integrada. O valor ao lado é o que ainda está em aberto nessa ordem.",
                     on_click=_clique_os("nx_os_oficina_lancamento", "nx_click_os_oficina_lancamento", True),
                     key="nx_click_os_oficina_lancamento",
                 ),
