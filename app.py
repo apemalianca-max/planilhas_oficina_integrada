@@ -937,7 +937,7 @@ def aba_os() -> None:
             key="download_oficina_os",
         )
     if resumo.empty:
-        if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
+        if not mostrar_dialogo_baixa() and st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
             dialogo_os()
         return
 
@@ -995,6 +995,8 @@ def aba_os() -> None:
                 column_config=column_config(list(itens.columns)),
                 alt=f"Serviços da OS {int(registro.id_os)}",
             )
+    if mostrar_dialogo_baixa():
+        return
     if st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") == "ordens":
         dialogo_os()
 
@@ -1733,15 +1735,33 @@ def render_os(numero: int) -> None:
         (numero,),
     )
     observacoes = observacoes_os(bloco)
+    texto_cruz, refs_cruz = cruzamento_grupo(os_oficina=str(numero))
+    nota_os = "\n\n".join(observacoes)
+    nota_os = juntar_obs_cruzamento(nota_os, texto_cruz) or "Sem observações."
     st.markdown("**Observações**")
-    st.text_area(
-        "Observações",
-        value="\n\n".join(observacoes) if observacoes else "Sem observações.",
-        height=120,
-        disabled=True,
-        label_visibility="collapsed",
-        key=f"obs_fin_{numero}",
-    )
+    if refs_cruz:
+        esquerda, direita = st.columns([3, 1.4], vertical_alignment="top")
+        with esquerda:
+            st.text_area(
+                "Observações",
+                value=nota_os,
+                height=140,
+                disabled=True,
+                label_visibility="collapsed",
+                key=f"obs_fin_{numero}",
+            )
+        with direita:
+            st.markdown("**Documentos**")
+            mostrar_botoes_cruzamento(refs_cruz, f"os_fin_{numero}")
+    else:
+        st.text_area(
+            "Observações",
+            value=nota_os,
+            height=120,
+            disabled=True,
+            label_visibility="collapsed",
+            key=f"obs_fin_{numero}",
+        )
     itens = servicos_da_os(bloco).rename(columns=OS_DETALHE_NOMES)
     if itens.empty:
         st.caption("Nenhum item ou serviço lançado nesta O.S.")
@@ -2312,6 +2332,26 @@ def montar_obs_pagamentos(nota: str, historico: list[str]) -> str:
     return bloco
 
 
+MARCA_CRUZAMENTO = "Cruzamento:"
+
+
+def sem_cruzamento(obs: str) -> str:
+    texto = (obs or "").replace("\r\n", "\n")
+    if MARCA_CRUZAMENTO not in texto:
+        return texto.strip()
+    return texto.split(MARCA_CRUZAMENTO, 1)[0].strip()
+
+
+def juntar_obs_cruzamento(obs: str, texto: str) -> str:
+    base = sem_cruzamento(obs)
+    bloco = (texto or "").strip()
+    if not bloco:
+        return base
+    if base:
+        return f"{base}\n{bloco}"
+    return bloco
+
+
 def historico_para_obs(obs: str, ja_pago: float, data_anterior: date | None) -> str:
     nota, historico = separar_historico_pagamentos(obs)
     if ja_pago <= 0.004:
@@ -2518,7 +2558,7 @@ def gravar_conta_baixa(
 
 
 def _obs_sem_pagamentos(obs: str) -> str:
-    limpo, _, _ = separar_obs_encargos(obs)
+    limpo, _, _ = separar_obs_encargos(sem_cruzamento(obs))
     nota, _ = separar_historico_pagamentos(limpo)
     return nota
 
@@ -2730,6 +2770,9 @@ def _dados_salvos(linha: pd.Series) -> dict:
     juros, multa, _ = _encargos_salvos(linha)
     quando = data_iso(linha["dt_pagamento"])
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    origem = "oficina" if "documento" in linha.index else "next"
+    texto, _ = cruzamento_titulo(linha, origem)
+    obs = juntar_obs_cruzamento(obs, texto)
     return _dados_documento(linha, juros, multa, valor_banco(linha["valor_pago"]), quando, obs)
 
 
@@ -2834,8 +2877,12 @@ def _preparar_form_baixa(conta_id: int, linha: pd.Series, reabrir: bool) -> None
     if not tem_salvo:
         juros, multa = encargos_legais(valor_banco(linha["valor"]) if reabrir else saldo, dias)
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    obs = sem_cruzamento(obs)
     if not reabrir:
         obs = historico_para_obs(obs, valor_banco(linha["valor_pago"]), data_iso(linha["dt_pagamento"]))
+    texto, refs = cruzamento_titulo(linha, "oficina")
+    st.session_state[f"bx_cruz_{conta_id}"] = refs
+    obs = juntar_obs_cruzamento(obs, texto)
     st.session_state[f"bx_juros_{conta_id}"] = float(juros)
     st.session_state[f"bx_multa_{conta_id}"] = float(multa)
     st.session_state[f"bx_obs_{conta_id}"] = obs
@@ -2871,7 +2918,7 @@ def _salvar_form_baixa(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
         st.error("Informe a data do pagamento.")
         return
     obs = obs_com_novo_pagamento(
-        texto_banco(st.session_state.get(f"bx_obs_{conta_id}")),
+        sem_cruzamento(texto_banco(st.session_state.get(f"bx_obs_{conta_id}"))),
         ja_pago=valor_banco(linha["valor_pago"]),
         data_anterior=data_iso(linha["dt_pagamento"]),
         pago_desta=pago_campo,
@@ -2913,6 +2960,16 @@ def dialogo_baixa() -> None:
     if ver:
         st.subheader("Documento da baixa")
         _ficha_conta(linha, dias)
+        refs_ver = list(st.session_state.get(f"bx_cruz_{conta_id}") or [])
+        if refs_ver or MARCA_CRUZAMENTO in texto_banco(st.session_state.get(f"bx_obs_{conta_id}")):
+            mostrar_obs_documentos(
+                f"bx_obs_{conta_id}",
+                refs_ver,
+                f"ver_bx_{conta_id}",
+                liberado=False,
+                altura=160,
+                somente_leitura=True,
+            )
         mostrar_documento_baixa(linha, f"bx_doc_{conta_id}")
         botoes_estorno("oficina", int(conta_id), linha)
         if st.button("Reabrir baixa", type="primary", width="stretch", key=f"bx_reabrir_doc_{conta_id}"):
@@ -2968,11 +3025,15 @@ def dialogo_baixa() -> None:
             "A partir desta baixa, a observação lista cada pagamento com a data e o valor, "
             "desde a primeira parcial até a quitação."
         )
-    st.text_area(
-        "Obs",
-        key=f"bx_obs_{conta_id}",
-        height=140 if valor_banco(linha["valor_pago"]) > 0.004 else 80,
-        disabled=not liberado,
+    obs_tela = texto_banco(st.session_state.get(f"bx_obs_{conta_id}"))
+    altura_obs = 160 if MARCA_CRUZAMENTO in obs_tela else (140 if valor_banco(linha["valor_pago"]) > 0.004 else 80)
+    mostrar_obs_documentos(
+        f"bx_obs_{conta_id}",
+        list(st.session_state.get(f"bx_cruz_{conta_id}") or []),
+        f"bx_{conta_id}",
+        liberado=liberado,
+        altura=altura_obs,
+        somente_leitura=False,
     )
     juros, multa, pago_total, devido = _totais_baixa(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
@@ -3283,8 +3344,8 @@ def aba_financeiro() -> None:
     m2.metric("Valor filtrado", brl(totais.iat[0, 1]))
     m3.metric("Saldo em aberto", brl(totais.iat[0, 3]))
     tabela_contas(frame, "todas", "fin_click_todas")
-    if st.session_state.get("fin_baixa_id"):
-        dialogo_baixa()
+    if mostrar_dialogo_baixa():
+        pass
     elif st.session_state.get("fin_os_perguntar") and st.session_state.get("fin_origem") != "ordens":
         dialogo_os()
     elif st.session_state.get("ultimas_lista") == "oficina":
@@ -3610,7 +3671,9 @@ def aba_clientes() -> None:
             column_config=config,
             alt="Clientes adimplentes",
         )
-    if st.session_state.get("cli_cliente"):
+    if mostrar_dialogo_baixa():
+        pass
+    elif st.session_state.get("cli_cliente"):
         dialogo_dividas()
 
 
@@ -5988,9 +6051,9 @@ def dialogo_ultimas_baixas() -> None:
 
 
 def dialogos_da_visao_oficina() -> None:
-    if st.session_state.get("fin_baixa_id"):
-        dialogo_baixa()
-    elif st.session_state.get("ultimas_lista") == "oficina":
+    if mostrar_dialogo_baixa():
+        return
+    if st.session_state.get("ultimas_lista") == "oficina":
         dialogo_ultimas_baixas()
 
 
@@ -6738,6 +6801,330 @@ def _numeros_vinculo(texto: str) -> list[str]:
     return vistos
 
 
+def _numero_documento_titulo(valor, reserva: str) -> str:
+    texto = texto_limpo(valor)
+    if texto.endswith(".0") and texto[:-2].replace("-", "").isdigit():
+        texto = texto[:-2]
+    return texto or reserva
+
+
+def _titulo_next(row) -> dict:
+    valor = round(valor_banco(row.valor), 2)
+    pago = round(valor_banco(row.valor_pago), 2)
+    return {
+        "origem": "next",
+        "id": int(row.id),
+        "numero": _numero_documento_titulo(row.codigo, str(int(row.id))),
+        "valor": valor,
+        "pago": pago,
+        "saldo": round(max(0.0, valor - pago), 2),
+        "quitado": str(row.quitado or "").strip().casefold() == "sim",
+        "data": data_iso(row.dt_pagamento),
+    }
+
+
+def _titulo_oficina(row) -> dict:
+    valor = round(valor_banco(row.valor), 2)
+    pago = round(valor_banco(row.valor_pago), 2)
+    os_num = texto_limpo(row.os)
+    if os_num.endswith(".0") and os_num[:-2].isdigit():
+        os_num = os_num[:-2]
+    numero = texto_limpo(row.documento) or (f"O.S. {os_num}" if os_num else str(int(row.id)))
+    return {
+        "origem": "oficina",
+        "id": int(row.id),
+        "numero": numero,
+        "valor": valor,
+        "pago": pago,
+        "saldo": round(max(0.0, valor - pago), 2),
+        "quitado": str(row.quitado or "").strip().casefold() == "sim",
+        "data": data_iso(row.dt_pagamento),
+    }
+
+
+def titulos_do_pedido(pedido: str) -> list[dict]:
+    chave = _chave_numero(pedido)
+    if not chave:
+        return []
+    frame = query(
+        f"""
+        SELECT id, codigo,
+               COALESCE(valor_liquido, 0) AS valor,
+               COALESCE(valor_pago, 0) AS valor_pago,
+               quitado,
+               data_pagamento AS dt_pagamento
+        FROM next_lancamento
+        WHERE tipo = 'receber'
+          AND {_PEDIDO_NO_HISTORICO} = ?
+        ORDER BY id
+        """,
+        (chave,),
+    )
+    return [_titulo_next(row) for row in frame.itertuples(index=False)]
+
+
+def titulos_da_os_oficina(numero: str) -> list[dict]:
+    chave = _chave_numero(numero)
+    if not chave:
+        return []
+    frame = query(
+        """
+        SELECT id, os, documento,
+               COALESCE(valor, 0) AS valor,
+               COALESCE(valor_pago, 0) AS valor_pago,
+               quitado,
+               dt_pagamento
+        FROM oficina_financeiro
+        WHERE lower(COALESCE(tipo, '')) = 'receita'
+          AND ltrim(CAST(os AS text), '0') = ?
+        ORDER BY id
+        """,
+        (chave,),
+    )
+    return [_titulo_oficina(row) for row in frame.itertuples(index=False)]
+
+
+def reunir_titulos(pedido: str = "", os_oficina: str = "", os_next: str = "") -> list[dict]:
+    vistos: dict[tuple[str, int], dict] = {}
+
+    def incluir(itens: list[dict]) -> None:
+        for item in itens:
+            vistos[(item["origem"], item["id"])] = item
+
+    for numero in _numeros_vinculo(pedido):
+        incluir(titulos_do_pedido(numero))
+        detalhe = detalhe_do_pedido(numero)
+        incluir(titulos_da_os_oficina(_texto_detalhe(detalhe.get("os_oficina"))))
+    for numero in _numeros_vinculo(os_oficina):
+        incluir(titulos_da_os_oficina(numero))
+        for ligado in pedidos_ligados("os_oficina", numero):
+            incluir(titulos_do_pedido(str(ligado.get("pedido") or "")))
+    for numero in _numeros_vinculo(os_next):
+        for ligado in pedidos_ligados("codos", numero):
+            incluir(titulos_do_pedido(str(ligado.get("pedido") or "")))
+            incluir(titulos_da_os_oficina(str(ligado.get("os_oficina") or "")))
+    return list(vistos.values())
+
+
+def _pedidos_do_contexto(pedido: str = "", os_oficina: str = "", os_next: str = "") -> list[str]:
+    numeros: list[str] = []
+
+    def add(valor) -> None:
+        chave = _chave_numero(valor)
+        if chave and chave not in numeros:
+            numeros.append(chave)
+
+    for numero in _numeros_vinculo(pedido):
+        add(numero)
+    for numero in _numeros_vinculo(os_oficina):
+        for ligado in pedidos_ligados("os_oficina", numero):
+            add(ligado.get("pedido"))
+    for numero in _numeros_vinculo(os_next):
+        for ligado in pedidos_ligados("codos", numero):
+            add(ligado.get("pedido"))
+    return numeros
+
+
+def _total_pedidos(pedido: str = "", os_oficina: str = "", os_next: str = "") -> float | None:
+    total = 0.0
+    achou = False
+    for numero in _pedidos_do_contexto(pedido, os_oficina, os_next):
+        detalhe = detalhe_do_pedido(numero)
+        valor = valor_banco(detalhe.get("valor_total")) if detalhe else 0.0
+        if valor > 0.004:
+            total = round(total + valor, 2)
+            achou = True
+    return total if achou else None
+
+
+def _saldo_exibido(item: dict, titulos: list[dict], total: float | None) -> float:
+    if item["quitado"] or item["saldo"] <= 0.004:
+        return 0.0
+    if total is None or total <= 0.004:
+        return item["saldo"]
+    soma_pago = round(sum(titulo["pago"] for titulo in titulos), 2)
+    gap = round(max(0.0, total - soma_pago), 2)
+    abertos = [titulo for titulo in titulos if not titulo["quitado"] and titulo["saldo"] > 0.004]
+    if (
+        len(abertos) == 1
+        and abertos[0]["origem"] == item["origem"]
+        and abertos[0]["id"] == item["id"]
+        and gap > 0.004
+        and item["saldo"] > gap + 0.004
+        and item["pago"] <= 0.004
+    ):
+        return gap
+    return item["saldo"]
+
+
+def _quando_pago(item: dict) -> str:
+    return data_br(item.get("data")) or "sem data"
+
+
+def _linhas_cruzamento(titulos: list[dict], total: float | None, atual: dict | None) -> tuple[list[str], list[dict]]:
+    linhas: list[str] = []
+    refs: list[dict] = []
+    vistos: set[tuple[str, int]] = set()
+
+    def apontar(item: dict) -> None:
+        chave = (item["origem"], item["id"])
+        if chave not in vistos:
+            vistos.add(chave)
+            refs.append(
+                {
+                    "origem": item["origem"],
+                    "id": item["id"],
+                    "numero": item["numero"],
+                    "quitado": item["quitado"],
+                }
+            )
+
+    if atual and atual["pago"] > 0.004:
+        linhas.append(f"Pago {brl(atual['pago'])} neste documento em {_quando_pago(atual)}.")
+    for item in titulos:
+        if atual and item["origem"] == atual["origem"] and item["id"] == atual["id"]:
+            continue
+        if item["pago"] > 0.004:
+            linhas.append(
+                f"Pago {brl(item['pago'])} no documento {item['numero']} em {_quando_pago(item)}."
+            )
+            apontar(item)
+        saldo = _saldo_exibido(item, titulos, total)
+        if saldo > 0.004:
+            linhas.append(f"Restante {brl(saldo)} no documento {item['numero']}.")
+            apontar(item)
+    return linhas, refs
+
+
+def _texto_cruzamento(linhas: list[str], refs: list[dict]) -> tuple[str, list[dict]]:
+    if not linhas or not refs:
+        return "", []
+    return MARCA_CRUZAMENTO + "\n" + "\n".join(linhas), refs
+
+
+def _contexto_titulo(linha: pd.Series, origem: str) -> tuple[str, str, str]:
+    if origem == "next":
+        pedido = numero_pedido_texto(texto_banco(linha.get("descricao")))
+        detalhe = detalhe_do_pedido(pedido) if pedido else {}
+        return pedido, _texto_detalhe(detalhe.get("os_oficina")), _texto_detalhe(detalhe.get("codos"))
+    return "", _chave_numero(linha.get("os")), ""
+
+
+def cruzamento_titulo(linha: pd.Series, origem: str) -> tuple[str, list[dict]]:
+    try:
+        if origem == "next" and _conta_a_pagar(linha):
+            return "", []
+        if origem == "oficina":
+            tipo = str(linha.get("tipo") or "").strip().casefold()
+            if tipo and tipo != "receita":
+                return "", []
+        pedido, os_oficina, os_next = _contexto_titulo(linha, origem)
+        titulos = reunir_titulos(pedido, os_oficina, os_next)
+        if len(titulos) < 2:
+            return "", []
+        atual = next(
+            (item for item in titulos if item["origem"] == origem and item["id"] == int(linha["id"])),
+            None,
+        )
+        if atual is None:
+            return "", []
+        total = _total_pedidos(pedido, os_oficina, os_next)
+        linhas, refs = _linhas_cruzamento(titulos, total, atual)
+        return _texto_cruzamento(linhas, refs)
+    except Exception as exc:
+        aviso = re.sub(r"postgres(?:ql)?://\S+", "", str(exc))
+        st.caption(f"Não foi possível cruzar os documentos. {aviso[:180]}")
+        return "", []
+
+
+def cruzamento_grupo(pedido: str = "", os_oficina: str = "", os_next: str = "") -> tuple[str, list[dict]]:
+    try:
+        titulos = reunir_titulos(pedido, os_oficina, os_next)
+        if len(titulos) < 2:
+            return "", []
+        total = _total_pedidos(pedido, os_oficina, os_next)
+        linhas, refs = _linhas_cruzamento(titulos, total, None)
+        return _texto_cruzamento(linhas, refs)
+    except Exception as exc:
+        aviso = re.sub(r"postgres(?:ql)?://\S+", "", str(exc))
+        st.caption(f"Não foi possível cruzar os documentos. {aviso[:180]}")
+        return "", []
+
+
+def abrir_titulo_cruzado(origem: str, conta_id: int, quitado: bool) -> None:
+    ver = bool(quitado)
+    if origem == "oficina":
+        st.session_state.next_baixa_id = None
+        st.session_state.next_baixa_reabrir = False
+        st.session_state.next_baixa_ver = False
+        st.session_state.fin_baixa_id = int(conta_id)
+        st.session_state.fin_baixa_reabrir = False
+        st.session_state.fin_baixa_ver = ver
+        st.session_state.fin_baixa_init = None
+    else:
+        st.session_state.fin_baixa_id = None
+        st.session_state.fin_baixa_reabrir = False
+        st.session_state.fin_baixa_ver = False
+        st.session_state.next_baixa_id = int(conta_id)
+        st.session_state.next_baixa_reabrir = False
+        st.session_state.next_baixa_ver = ver
+        st.session_state.next_baixa_init = None
+    st.rerun()
+
+
+def mostrar_botoes_cruzamento(refs: list[dict], chave: str) -> None:
+    for item in refs:
+        if st.button(
+            f"Documento {item['numero']}",
+            key=f"cruzbtn_{chave}_{item['origem']}_{item['id']}",
+            width="stretch",
+        ):
+            abrir_titulo_cruzado(item["origem"], int(item["id"]), bool(item["quitado"]))
+
+
+def mostrar_obs_documentos(
+    chave_obs: str,
+    refs: list[dict],
+    chave_btn: str,
+    *,
+    liberado: bool,
+    altura: int,
+    somente_leitura: bool,
+) -> None:
+    if refs:
+        esquerda, direita = st.columns([3, 1.4], vertical_alignment="top")
+        with esquerda:
+            _widget_obs(chave_obs, liberado, altura, somente_leitura)
+        with direita:
+            st.markdown("**Documentos**")
+            mostrar_botoes_cruzamento(refs, chave_btn)
+        return
+    _widget_obs(chave_obs, liberado, altura, somente_leitura)
+
+
+def _widget_obs(chave_obs: str, liberado: bool, altura: int, somente_leitura: bool) -> None:
+    if somente_leitura:
+        st.text_area(
+            "Obs",
+            value=texto_banco(st.session_state.get(chave_obs)),
+            height=altura,
+            disabled=True,
+            key=f"leitura_{chave_obs}",
+        )
+        return
+    st.text_area("Obs", key=chave_obs, height=altura, disabled=not liberado)
+
+
+def mostrar_dialogo_baixa() -> bool:
+    if st.session_state.get("fin_baixa_id"):
+        dialogo_baixa()
+        return True
+    if st.session_state.get("next_baixa_id"):
+        dialogo_baixa_next()
+        return True
+    return False
+
+
 def conta_baixa_os_next(numero: str) -> dict | None:
     chave = _chave_numero(numero)
     if not chave:
@@ -7468,8 +7855,12 @@ def _preparar_baixa_next(conta_id: int, linha: pd.Series, reabrir: bool) -> None
     elif _conta_a_pagar(linha):
         juros = 0.0
     obs, _, _ = separar_obs_encargos(texto_banco(linha["obs_conta"]))
+    obs = sem_cruzamento(obs)
     if not reabrir:
         obs = historico_para_obs(obs, valor_banco(linha["valor_pago"]), data_iso(linha["dt_pagamento"]))
+    texto, refs = cruzamento_titulo(linha, "next")
+    st.session_state[f"nx_cruz_{conta_id}"] = refs
+    obs = juntar_obs_cruzamento(obs, texto)
     st.session_state[f"nx_juros_{conta_id}"] = float(juros)
     st.session_state[f"nx_multa_{conta_id}"] = float(multa)
     st.session_state[f"nx_obs_{conta_id}"] = obs
@@ -7597,7 +7988,7 @@ def _salvar_baixa_next(linha: pd.Series, conta_id: int, reabrir: bool, quitar: b
         st.error("Informe a data do pagamento.")
         return
     obs = obs_com_novo_pagamento(
-        texto_banco(st.session_state.get(f"nx_obs_{conta_id}")),
+        sem_cruzamento(texto_banco(st.session_state.get(f"nx_obs_{conta_id}"))),
         ja_pago=valor_banco(linha["valor_pago"]),
         data_anterior=data_iso(linha["dt_pagamento"]),
         pago_desta=pago_campo,
@@ -7668,10 +8059,21 @@ def dialogo_baixa_next() -> None:
         return
     reabrir = bool(st.session_state.get("next_baixa_reabrir"))
     ver = bool(st.session_state.get("next_baixa_ver")) and not reabrir
+    _preparar_baixa_next(int(conta_id), linha, reabrir)
     dias = dias_em_atraso(linha["vencimento"], "Nao")
     if ver:
         st.subheader("Documento da baixa")
         _ficha_next(linha, dias, mostrar_baixa=True)
+        refs_ver = list(st.session_state.get(f"nx_cruz_{conta_id}") or [])
+        if refs_ver or MARCA_CRUZAMENTO in texto_banco(st.session_state.get(f"nx_obs_{conta_id}")):
+            mostrar_obs_documentos(
+                f"nx_obs_{conta_id}",
+                refs_ver,
+                f"ver_nx_{conta_id}",
+                liberado=False,
+                altura=160,
+                somente_leitura=True,
+            )
         mostrar_documento_baixa(linha, f"nx_doc_{conta_id}")
         botoes_estorno("next", int(conta_id), linha)
         if st.button("Reabrir baixa", type="primary", width="stretch", key=f"nx_reabrir_doc_{conta_id}"):
@@ -7680,7 +8082,6 @@ def dialogo_baixa_next() -> None:
             st.session_state.next_baixa_init = None
             st.rerun()
         return
-    _preparar_baixa_next(int(conta_id), linha, reabrir)
     if reabrir:
         st.subheader("Reabrir baixa")
     _ficha_next(linha, dias, mostrar_baixa=reabrir)
@@ -7739,11 +8140,15 @@ def dialogo_baixa_next() -> None:
             "A partir desta baixa, a observação lista cada pagamento com a data e o valor, "
             "desde a primeira parcial até a quitação."
         )
-    st.text_area(
-        "Obs",
-        key=f"nx_obs_{conta_id}",
-        height=140 if valor_banco(linha["valor_pago"]) > 0.004 else 80,
-        disabled=not liberado,
+    obs_tela = texto_banco(st.session_state.get(f"nx_obs_{conta_id}"))
+    altura_obs = 160 if MARCA_CRUZAMENTO in obs_tela else (140 if valor_banco(linha["valor_pago"]) > 0.004 else 80)
+    mostrar_obs_documentos(
+        f"nx_obs_{conta_id}",
+        list(st.session_state.get(f"nx_cruz_{conta_id}") or []),
+        f"nx_{conta_id}",
+        liberado=liberado,
+        altura=altura_obs,
+        somente_leitura=False,
     )
     juros, multa, pago_total, devido = _totais_next(linha, int(conta_id), reabrir)
     restante = round(max(0.0, devido - pago_total), 2)
@@ -8883,8 +9288,8 @@ def visao_next() -> None:
         o3.metric("Produtos abaixo do mínimo", inteiro(operacao.iat[0, 3]))
         st.caption("Pedido, nota e ordem de serviço ficam nos menus Vendas, Notas Fiscais e Ordem de Serviço.")
     origem_next()
-    if st.session_state.get("next_baixa_id"):
-        dialogo_baixa_next()
+    if mostrar_dialogo_baixa():
+        pass
     elif str(st.session_state.get("ultimas_lista") or "").startswith("next"):
         dialogo_ultimas_baixas()
 
@@ -8999,8 +9404,8 @@ def clientes_next() -> None:
         base = base[base["quitado"].fillna("").astype(str).str.casefold().ne("sim")]
     st.caption("O valor do cliente fica separado em contas vencidas e contas a vencer. O botão abre as notas em aberto.")
     mostrar_totais_cliente(base)
-    if st.session_state.get("next_baixa_id"):
-        dialogo_baixa_next()
+    if mostrar_dialogo_baixa():
+        pass
     elif st.session_state.get("nx_os_da_conta") and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
     elif st.session_state.get("nx_pedido_da_conta") and st.session_state.get("cruz_doc_id"):
@@ -9321,16 +9726,25 @@ def _valores_editados() -> dict[str, str]:
     for widget, campo in mapa.items():
         bruto = st.session_state.get(widget)
         if isinstance(bruto, str):
-            valores[campo] = texto_banco(bruto)
+            valores[campo] = texto_banco(sem_cruzamento(bruto))
     return valores
 
 
-def _campo_pedido(rotulo: str, valor, chave: str, travado: bool = False, campo: str | None = None) -> None:
+def _campo_pedido(
+    rotulo: str,
+    valor,
+    chave: str,
+    travado: bool = False,
+    campo: str | None = None,
+    extra: str = "",
+    refs: list | None = None,
+    multilinha: bool = False,
+) -> None:
     nome = campo or chave
-    texto = _valor_campo(valor)
+    texto = sem_cruzamento(_valor_campo(valor))
     overlay = st.session_state.get("nx_overlay") or {}
     if nome in overlay:
-        texto = overlay[nome]
+        texto = sem_cruzamento(overlay[nome])
     mapa = dict(st.session_state.get("nx_mapa_campos") or {})
     mapa[chave] = nome
     st.session_state.nx_mapa_campos = mapa
@@ -9338,12 +9752,33 @@ def _campo_pedido(rotulo: str, valor, chave: str, travado: bool = False, campo: 
     antes[nome] = texto
     st.session_state.nx_antes = antes
     editavel = (not travado) and bool(st.session_state.get("nx_editavel"))
-    if not editavel:
-        st.text_input(rotulo, value=texto, disabled=True, key=chave)
+    visivel = juntar_obs_cruzamento(texto, extra)
+    usar_area = multilinha or bool(extra)
+    documentos = list(refs or [])
+
+    def desenhar() -> None:
+        if not editavel:
+            if usar_area:
+                st.text_area(rotulo, value=visivel, disabled=True, key=chave, height=140)
+            else:
+                st.text_input(rotulo, value=texto, disabled=True, key=chave)
+            return
+        if chave not in st.session_state:
+            st.session_state[chave] = visivel if usar_area else texto
+        if usar_area:
+            st.text_area(rotulo, key=chave, height=140)
+        else:
+            st.text_input(rotulo, key=chave)
+
+    if not documentos:
+        desenhar()
         return
-    if chave not in st.session_state:
-        st.session_state[chave] = texto
-    st.text_input(rotulo, key=chave)
+    esquerda, direita = st.columns([3, 1.4], vertical_alignment="top")
+    with esquerda:
+        desenhar()
+    with direita:
+        st.markdown("**Documentos**")
+        mostrar_botoes_cruzamento(documentos, chave)
 
 
 def _data_informada(texto: str) -> date | None:
@@ -9817,8 +10252,24 @@ def ficha_pedido(codigo: str) -> None:
             f"{cliente or 'Sem cliente'} · {data_br(detalhe.get('data')) or 'sem data'} · "
             f"{condicao or 'sem condição de pagamento'} · {entrega or 'sem condição de entrega'}"
         )
-        if _texto_detalhe(detalhe.get("observacoes")):
-            st.caption(_texto_detalhe(detalhe.get("observacoes")))
+        texto_cruz, refs_cruz = cruzamento_grupo(pedido=_chave_numero(codigo))
+        nota_pedido = juntar_obs_cruzamento(_texto_detalhe(detalhe.get("observacoes")), texto_cruz)
+        if nota_pedido or refs_cruz:
+            if refs_cruz:
+                esquerda, direita = st.columns([3, 1.4], vertical_alignment="top")
+                with esquerda:
+                    st.text_area(
+                        "Observações do pedido",
+                        value=nota_pedido or "Sem observações.",
+                        height=140,
+                        disabled=True,
+                        key=f"ped_vazio_{chave}_obs",
+                    )
+                with direita:
+                    st.markdown("**Documentos**")
+                    mostrar_botoes_cruzamento(refs_cruz, f"ped_vazio_{chave}")
+            else:
+                st.caption(nota_pedido)
         botao_financeiro_vinculado(_chave_numero(codigo), f"fin_ped_vazio_{chave}")
         st.info("Este pedido não tem a lista de peças na carga de vendas.")
         return
@@ -9925,7 +10376,16 @@ def ficha_pedido(codigo: str) -> None:
             _campo_pedido("Nome/razão social do transportador", "", f"ped_{chave}_transp", campo="transportador")
         with c4:
             _campo_pedido("Valor do frete", "", f"ped_{chave}_frete", campo="frete")
-        _campo_pedido("Observações do pedido", observacao, f"ped_{chave}_obs", campo="obs")
+        texto_cruz, refs_cruz = cruzamento_grupo(pedido=_chave_numero(codigo))
+        _campo_pedido(
+            "Observações do pedido",
+            observacao,
+            f"ped_{chave}_obs",
+            campo="obs",
+            extra=texto_cruz,
+            refs=refs_cruz,
+            multilinha=True,
+        )
         extras = [
             ("CPF", detalhe.get("cpf"), "cpf"),
             ("Quantidade", detalhe.get("quantidade"), "quantidade_detalhe"),
@@ -10260,7 +10720,16 @@ def ficha_os(codigo: str) -> None:
             _campo_pedido("Data de aprovação", data_br(linha["aprovacao"]), f"os_{chave}_aprov", campo="aprovacao")
         _campo_pedido("Problema", linha["problema"], f"os_{chave}_prob", campo="problema")
         _campo_pedido("Entrada", linha["entrada"], f"os_{chave}_entrada", campo="entrada")
-        _campo_pedido("Observações", linha["observacoes"], f"os_{chave}_obs", campo="observacoes")
+        texto_cruz, refs_cruz = cruzamento_grupo(os_next=_chave_numero(codigo))
+        _campo_pedido(
+            "Observações",
+            linha["observacoes"],
+            f"os_{chave}_obs",
+            campo="observacoes",
+            extra=texto_cruz,
+            refs=refs_cruz,
+            multilinha=True,
+        )
         if liberado and st.button("Gravar alterações", type="primary", key=f"gravar_os_{chave}"):
             valores = _valores_editados()
             gravar_campos("os", codigo, valores)
@@ -10707,7 +11176,9 @@ def painel_cruzamento(mostrar_menu: bool = True) -> None:
         return
     st.caption("Os mais recentes aparecem primeiro. Abrir entra no documento, nas peças e nos eventos.")
     _grade_documentos(lista, pessoa)
-    if st.session_state.get("cruz_doc_id"):
+    if mostrar_dialogo_baixa():
+        pass
+    elif st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
 
 
@@ -11230,7 +11701,9 @@ def tela_os_abertas() -> None:
         },
         alt="Ordens de serviço em aberto",
     )
-    if st.session_state.get("cruz_doc_tipo") == "os" and st.session_state.get("cruz_doc_id"):
+    if mostrar_dialogo_baixa():
+        pass
+    elif st.session_state.get("cruz_doc_tipo") == "os" and st.session_state.get("cruz_doc_id"):
         dialogo_documento_cruz()
 
 
