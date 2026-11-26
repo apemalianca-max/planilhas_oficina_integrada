@@ -1762,6 +1762,17 @@ def render_os(numero: int) -> None:
             label_visibility="collapsed",
             key=f"obs_fin_{numero}",
         )
+    total_servicos = pd.to_numeric(bloco["valor_total"], errors="coerce").fillna(0).sum()
+    with st.container(border=True):
+        st.markdown("**Totais**")
+        st.metric("Total dos serviços", brl(total_servicos))
+        mostrar_pago_em_aberto(
+            f"O.S. O. Integrada {numero}",
+            pedido=vinculos["pedido"],
+            os_oficina=_juntar_codigos([str(numero), vinculos["os_oficina"]]),
+            os_next=vinculos["os_next"],
+            os_top=juntar_numeros(texto_os_top(_texto_detalhe(linha.obs)), vinculos.get("os_top")),
+        )
     itens = servicos_da_os(bloco).rename(columns=OS_DETALHE_NOMES)
     if itens.empty:
         st.caption("Nenhum item ou serviço lançado nesta O.S.")
@@ -1773,8 +1784,6 @@ def render_os(numero: int) -> None:
         column_config=column_config(list(itens.columns)),
         alt=f"Serviços da OS {numero}",
     )
-    total = pd.to_numeric(bloco["valor_total"], errors="coerce").fillna(0).sum()
-    st.caption(f"Total dos serviços: {brl(total)}")
 
 
 @st.dialog("Ordem de serviço", width="large", on_dismiss=dispensar_os)
@@ -5768,7 +5777,27 @@ def lancamentos_next(tipo: str) -> pd.DataFrame:
     )
 
 
+def destacar_obs() -> None:
+    st.html(
+        """
+        <style>
+        [class*="st-key-"][class*="_obs"] textarea,
+        [class*="st-key-obs_"] textarea,
+        [class*="st-key-leitura_"] textarea {
+          font-weight: 700 !important;
+          font-size: 17px !important;
+          line-height: 1.45 !important;
+          color: #083526 !important;
+          -webkit-text-fill-color: #083526 !important;
+          opacity: 1 !important;
+        }
+        </style>
+        """
+    )
+
+
 def cabecalho_modulo() -> None:
+    destacar_obs()
     logo, titulo, sair = st.columns([1, 4, 1], vertical_alignment="center")
     with logo:
         mostrar_logo(92)
@@ -6994,6 +7023,82 @@ def _linhas_cruzamento(titulos: list[dict], total: float | None, atual: dict | N
             linhas.append(f"Restante {brl(saldo)} no documento {item['numero']}.")
             apontar(item)
     return linhas, refs
+
+
+def _pago_aberto_titulos(titulos: list[dict], total: float | None) -> tuple[float, float]:
+    pago = round(sum(item["pago"] for item in titulos), 2)
+    aberto = round(sum(_saldo_exibido(item, titulos, total) for item in titulos), 2)
+    return pago, aberto
+
+
+def mostrar_pago_em_aberto(
+    documento: str,
+    *,
+    pedido: str = "",
+    os_oficina: str = "",
+    os_next: str = "",
+    os_top: str = "",
+) -> None:
+    try:
+        cartoes: list[tuple[str, float | None, float | None, str]] = []
+        vistos: set[str] = set()
+
+        def registrar(rotulo: str, titulos: list[dict], total: float | None, nota: str = "") -> None:
+            if not rotulo or rotulo in vistos:
+                return
+            vistos.add(rotulo)
+            if not titulos:
+                cartoes.append((rotulo, None, None, nota))
+                return
+            pago, aberto = _pago_aberto_titulos(titulos, total)
+            cartoes.append((rotulo, pago, aberto, nota))
+
+        pedidos = _numeros_vinculo(pedido)
+        titulos_pedidos: list[dict] = []
+        vistos_titulo: set[tuple[str, int]] = set()
+        for numero in pedidos:
+            for item in titulos_do_pedido(numero):
+                chave = (item["origem"], item["id"])
+                if chave not in vistos_titulo:
+                    vistos_titulo.add(chave)
+                    titulos_pedidos.append(item)
+        total_pedidos = _total_pedidos(pedido)
+        for numero in pedidos:
+            registrar(f"Pedido {numero}", titulos_do_pedido(numero), _total_pedidos(numero))
+        for numero in _numeros_vinculo(os_oficina):
+            registrar(f"O.S. O. Integrada {numero}", titulos_da_os_oficina(numero), None)
+        for numero in _numeros_vinculo(os_next):
+            registrar(
+                f"O.S. NeXT {numero}",
+                titulos_pedidos,
+                total_pedidos,
+                "A baixa desta O.S. está nos documentos do pedido." if titulos_pedidos else "",
+            )
+        for numero in _numeros_vinculo(os_top):
+            registrar(f"O.S. O. TOP {numero}", [], None, "Sem conta de baixa neste painel.")
+    except Exception as exc:
+        aviso = re.sub(r"postgres(?:ql)?://\S+", "", str(exc))
+        st.caption(f"Não foi possível ler o pago e o em aberto. {aviso[:180]}")
+        return
+    if not cartoes:
+        return
+    doc = documento.strip()
+    cartoes.sort(key=lambda item: (0 if item[0] == doc else 1, item[0]))
+    st.markdown("**Pago e em aberto**")
+    for inicio in range(0, len(cartoes), 3):
+        fatia = cartoes[inicio : inicio + 3]
+        colunas = st.columns(len(fatia), vertical_alignment="top")
+        for coluna, (rotulo, pago, aberto, nota) in zip(colunas, fatia, strict=True):
+            with coluna:
+                pago_txt = "—" if pago is None else brl(pago)
+                aberto_txt = "—" if aberto is None else brl(aberto)
+                coluna_pago, coluna_aberto = st.columns(2)
+                coluna_pago.metric(f"Pago · {rotulo}", pago_txt)
+                coluna_aberto.metric(f"Em aberto · {rotulo}", aberto_txt)
+                if pago is None:
+                    st.caption(nota or "Sem conta de baixa neste painel.")
+                elif nota:
+                    st.caption(nota)
 
 
 def _texto_cruzamento(linhas: list[str], refs: list[dict]) -> tuple[str, list[dict]]:
@@ -10490,6 +10595,13 @@ def ficha_pedido(codigo: str) -> None:
         t3.metric("Total serviços", "—")
         t4.metric("Desconto", "—" if desconto_vazio else brl(desconto_total))
         t5.metric("Total do pedido", brl(total_produtos if total_vazio else total_planilha))
+        mostrar_pago_em_aberto(
+            f"Pedido {_chave_numero(codigo)}",
+            pedido=_chave_numero(codigo),
+            os_oficina=_texto_detalhe(detalhe.get("os_oficina")),
+            os_next=_texto_detalhe(detalhe.get("codos")),
+            os_top=texto_os_top(_texto_detalhe(detalhe.get("observacoes"))),
+        )
         if tem_custo and custo:
             lucro = round(total_produtos - custo, 2)
             margem = round(lucro / custo * 100, 2)
@@ -10785,6 +10897,13 @@ def ficha_os(codigo: str) -> None:
         t1.metric("Total produtos", brl(linha["total_produtos"]))
         t2.metric("Total serviços", brl(linha["total_servicos"]))
         t3.metric("Total da ordem", brl(linha["total"]))
+        mostrar_pago_em_aberto(
+            f"O.S. NeXT {_chave_numero(codigo)}",
+            pedido=vinculos["pedido"],
+            os_oficina=vinculos["os_oficina"],
+            os_next=_juntar_codigos([codigo, vinculos["os_next"]]),
+            os_top=juntar_numeros(texto_os_top(_texto_detalhe(linha["observacoes"])), vinculos.get("os_top")),
+        )
     mostrar_historico_alteracao("os", codigo)
 
 
