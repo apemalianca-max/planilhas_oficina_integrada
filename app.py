@@ -10098,10 +10098,13 @@ def gravar_campos(escopo: str, registro: str, valores: dict[str, str]) -> None:
     st.cache_data.clear()
 
 
+_ESCOPOS_BAIXA = {"baixa_oficina", "baixa_next", "editor_baixa"}
+
+
 def indagar_edicao(escopo: str, registro: str, titulo: str) -> bool:
     marca = f"{escopo}:{registro}"
     seguro = _chave_widget(marca)
-    if not usuario_admin():
+    if not usuario_admin() and escopo not in _ESCOPOS_BAIXA:
         st.caption("Somente o administrador pode editar os campos deste painel.")
         return False
     liberadas = dict(st.session_state.get("edicao_ok") or {})
