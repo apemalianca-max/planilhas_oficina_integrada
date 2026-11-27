@@ -1155,21 +1155,32 @@ def ordenar_busca_lancamento(
         frame["vencimento"], pagamentos, em_aberto, identificadores, strict=True
     ):
         quando = data_iso(vencimento)
+        pago_em = data_iso(pagamento)
         vencido = bool(aberto) and quando is not None and (hoje - quando).days > 0
-        referencia = quando or data_iso(pagamento)
-        recente = -referencia.toordinal() if referencia is not None else 10**12
         try:
-            recente_id = -int(identificador)
+            codigo = int(identificador)
         except (TypeError, ValueError):
-            recente_id = 0
-        chaves.append((0 if vencido else 1, recente, recente_id))
-    ordem = pd.DataFrame(chaves, index=frame.index, columns=["_grupo", "_recente", "_id"])
+            codigo = 0
+        if vencido:
+            grupo = 0
+            posicao = quando.toordinal()
+            desempate = codigo
+        elif aberto:
+            grupo = 1
+            posicao = quando.toordinal() if quando is not None else 10**12
+            desempate = codigo
+        else:
+            grupo = 2
+            posicao = -pago_em.toordinal() if pago_em is not None else 10**12
+            desempate = -codigo
+        chaves.append((grupo, posicao, desempate))
+    ordem = pd.DataFrame(chaves, index=frame.index, columns=["_grupo", "_posicao", "_id"])
     saida = frame.copy()
     saida["_grupo"] = ordem["_grupo"]
-    saida["_recente"] = ordem["_recente"]
+    saida["_posicao"] = ordem["_posicao"]
     saida["_id"] = ordem["_id"]
-    return saida.sort_values(["_grupo", "_recente", "_id"], kind="mergesort").drop(
-        columns=["_grupo", "_recente", "_id"]
+    return saida.sort_values(["_grupo", "_posicao", "_id"], kind="mergesort").drop(
+        columns=["_grupo", "_posicao", "_id"]
     )
 
 
@@ -9276,10 +9287,14 @@ def painel_contas_next() -> None:
                 "Nas contas em aberto, o valor da dívida é o total das vendas menos o desconto e menos o pagamento parcial. "
                 "Quem não pagou nada fica com o líquido do pedido. A diferença lançada como juros foi retirada. "
                 "O botão de juros calcula esse acréscimo de novo. "
-                "Os vencidos ficam no topo. Em seguida, a lista vai da data mais recente para a mais antiga. "
                 "O número de dias fica em destaque."
                 if tipo == "receber"
                 else ""
+            )
+            + (
+                " A lista começa pelas vencidas, da mais antiga para a mais recente. "
+                "Depois vêm as em aberto, do próximo vencimento para o mais distante. "
+                "Por último as pagas, da baixa mais recente para a mais antiga."
             )
         )
         tabela = visivel
