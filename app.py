@@ -722,48 +722,12 @@ def ultimas_baixas_oficina() -> pd.DataFrame:
 
 
 def visao_geral() -> None:
-    mostrar_lembrete_baixa()
-    if st.button("Pesquisar histórico", type="primary", key="abrir_historico"):
-        st.session_state.historico_aberto = True
-    if st.session_state.get("historico_aberto"):
-        painel_historico()
-        dialogos_da_visao_oficina()
-        return
-    ordens = int(scalar("SELECT COUNT(DISTINCT id_os) FROM oficina_os") or 0)
-    itens = int(scalar("SELECT COUNT(*) FROM oficina_os") or 0)
-    clientes = int(
-        scalar(
-            """
-            SELECT COUNT(*) FROM (
-                SELECT id_cliente AS cliente FROM oficina_os WHERE id_cliente IS NOT NULL
-                UNION
-                SELECT cliente FROM oficina_financeiro WHERE cliente IS NOT NULL
-                UNION
-                SELECT id_cliente FROM oficina_nfse WHERE id_cliente IS NOT NULL
-            ) clientes
-            """
-        )
-        or 0
-    )
-    contas = int(scalar("SELECT COUNT(*) FROM oficina_financeiro") or 0)
-    notas = int(scalar("SELECT COUNT(*) FROM oficina_nfse") or 0)
-    despesa = scalar("SELECT SUM(valor) FROM oficina_financeiro WHERE tipo = 'Despesa'")
     aberto = scalar(
         "SELECT SUM(valor - valor_pago) FROM oficina_financeiro WHERE " + ABERTO_SQL
     )
     qtd_aberto = int(scalar("SELECT COUNT(*) FROM oficina_financeiro WHERE " + ABERTO_SQL) or 0)
-    autorizadas = int(scalar("SELECT COUNT(*) FROM oficina_nfse WHERE status_nf = 'Autorizada'") or 0)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ordens de serviço", inteiro(ordens), help="O.S. distintas")
-    c2.metric("Itens de serviço", inteiro(itens))
-    c3.metric("Clientes", inteiro(clientes), help="Clientes unificados entre OS, financeiro e NFS-e")
-    c4.metric("NFS-e", inteiro(notas), help=f"{inteiro(autorizadas)} autorizadas")
-
-    c5, c6 = st.columns([1, 2])
-    c5.metric("Contas", inteiro(contas))
-    c5.caption(f"Despesas lançadas: {brl(despesa)}")
-    with c6:
+    _, card, _ = st.columns([1, 2, 1])
+    with card:
         st.markdown(
             f"""
             <div style="background:#fff6ed;border:2px solid #c2410c;border-radius:14px;padding:18px 22px;">
@@ -780,101 +744,6 @@ def visao_geral() -> None:
             on_click=ir_financeiro_aberto,
             width="stretch",
         )
-
-    left, right = st.columns(2)
-    situacao = query(
-        f"""
-        SELECT {SITUACAO_SQL} AS situacao,
-               COUNT(DISTINCT id_os) AS ordens
-        FROM oficina_os
-        GROUP BY 1
-        ORDER BY ordens DESC
-        """
-    )
-    status = query(
-        """
-        SELECT status_nf AS status, COUNT(*) AS notas
-        FROM oficina_nfse
-        GROUP BY status_nf
-        ORDER BY notas DESC
-        """
-    )
-    with left:
-        st.subheader("OS por situação")
-        if situacao.empty:
-            st.write("Sem dados.")
-        else:
-            st.bar_chart(situacao.set_index("situacao")["ordens"], height=280, sort=False)
-    with right:
-        st.subheader("NFS-e por status")
-        if status.empty:
-            st.write("Sem dados.")
-        else:
-            st.bar_chart(status.set_index("status")["notas"], height=280)
-
-    mensal_os = query(
-        """
-        SELECT substr(data_entrada, 1, 7) AS mes, COUNT(DISTINCT id_os) AS ordens
-        FROM oficina_os
-        WHERE data_entrada IS NOT NULL
-        GROUP BY mes
-        ORDER BY mes
-        """
-    )
-    mensal_fin = query(
-        """
-        SELECT substr(data_lancamento, 1, 7) AS mes,
-               SUM(CASE WHEN tipo = 'Receita' THEN valor ELSE 0 END) AS receitas,
-               SUM(CASE WHEN tipo = 'Despesa' THEN valor ELSE 0 END) AS despesas
-        FROM oficina_financeiro
-        WHERE data_lancamento IS NOT NULL
-        GROUP BY mes
-        ORDER BY mes
-        """
-    )
-    left, right = st.columns(2)
-    with left:
-        st.subheader("OS por mês de entrada")
-        if not mensal_os.empty:
-            st.line_chart(mensal_os.set_index("mes")["ordens"], height=280)
-    with right:
-        st.subheader("Lançamentos por mês")
-        if not mensal_fin.empty:
-            st.line_chart(mensal_fin.set_index("mes")[["receitas", "despesas"]], height=280)
-
-    st.subheader("Maiores clientes por receita")
-    top = query(
-        """
-        SELECT nome AS cliente,
-               COUNT(*) AS contas,
-               ROUND(SUM(valor), 2) AS valor,
-               ROUND(SUM(valor_pago), 2) AS valor_pago
-        FROM oficina_financeiro
-        WHERE tipo = 'Receita' AND nome IS NOT NULL AND TRIM(nome) <> ''
-        GROUP BY nome
-        ORDER BY valor DESC
-        LIMIT 15
-        """
-    )
-    if not top.empty:
-        mostrar_planilha(
-            format_frame(top),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "cliente": "cliente",
-                "contas": st.column_config.NumberColumn("contas", format="%d"),
-                "valor": st.column_config.NumberColumn("valor", format="R$ %.2f"),
-                "valor_pago": st.column_config.NumberColumn("valor pago", format="R$ %.2f"),
-            },
-        )
-
-    importado = query(
-        "SELECT arquivo, aba, registros, importado_em FROM oficina_importacao ORDER BY id"
-    )
-    if not importado.empty:
-        with st.expander("Origem da importação"):
-            mostrar_planilha(format_frame(importado), width="stretch", hide_index=True)
     dialogos_da_visao_oficina()
 
 
