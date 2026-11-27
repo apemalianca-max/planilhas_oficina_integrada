@@ -4695,11 +4695,11 @@ def botao_copiar_link(url: str, chave: str, cor: str = "#16324f") -> None:
 
 def atalho_reposicao_login() -> None:
     st.divider()
-    st.subheader("Pedido/Reposição de estoque")
-    st.caption("Sem senha. O botão da esquerda abre o painel. O outro copia o link para compartilhar.")
+    st.subheader("Reposição de peças")
+    st.caption("Sem senha. Abre a lista para anotar a peça que está acabando.")
     abrir, copiar = st.columns(2, vertical_alignment="center")
     if abrir.button(
-        "Pedido/Reposição de estoque",
+        "Reposição de peças",
         type="primary",
         width="stretch",
         key="abrir_reposicao_login",
@@ -4849,13 +4849,19 @@ def _atualizar_grade_pedidos() -> None:
     st.session_state.repo_grade_versao = int(st.session_state.get("repo_grade_versao") or 0) + 1
 
 
-def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: str) -> None:
+def lancar_item_pedido(
+    marcacao: str,
+    codigo: str,
+    descricao: str,
+    observacao: str,
+    quantidade: float | None = None,
+) -> None:
     codigo = str(codigo or "").strip()
     descricao = str(descricao or "").strip()
     observacao = str(observacao or "").strip()
     if not codigo and not descricao:
         st.session_state.repo_ok = ""
-        st.session_state.repo_aviso = "Digite o código ou a descrição do produto."
+        st.session_state.repo_aviso = "Digite a peça ou o código."
         return
     try:
         garantir_pedido_reposicao()
@@ -4864,8 +4870,9 @@ def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: s
             conn.execute(
                 text(
                     """
-                    INSERT INTO painel_pedido_reposicao (linha, marcacao, codigo, descricao, observacao)
-                    VALUES (:linha, :marcacao, :codigo, :descricao, :observacao)
+                    INSERT INTO painel_pedido_reposicao
+                        (linha, marcacao, codigo, descricao, observacao, quantidade)
+                    VALUES (:linha, :marcacao, :codigo, :descricao, :observacao, :quantidade)
                     """
                 ),
                 {
@@ -4874,22 +4881,22 @@ def lancar_item_pedido(marcacao: str, codigo: str, descricao: str, observacao: s
                     "codigo": codigo or None,
                     "descricao": descricao or None,
                     "observacao": observacao or None,
+                    "quantidade": _quantidade_planilha(quantidade),
                 },
             )
-            apagar_ultimo_pedido(conn)
             aparar_pedidos_reposicao(conn)
     except Exception as erro:
         st.session_state.repo_ok = ""
         aviso = re.sub(r"postgres(?:ql)?(?:\+psycopg)?://\S+", "", str(erro))
         st.session_state.repo_aviso = (
-            "Não foi possível lançar este produto. "
-            + (aviso[:160] or "Clique de novo em Reposição ou Vendido.")
+            "Não foi possível anotar esta peça. "
+            + (aviso[:160] or "Clique em Anotar de novo.")
         )
         return
     ler_pedidos_reposicao.clear()
     _atualizar_grade_pedidos()
     st.session_state.repo_aviso = ""
-    st.session_state.repo_ok = f"Lançado: {descricao_com_observacao(descricao, observacao)} ({rotulo_marcacao(marcacao)})"
+    st.session_state.repo_ok = f"Anotado: {descricao_com_observacao(descricao, observacao)}"
 
 
 def _quantidade_planilha(valor) -> float | None:
@@ -4912,31 +4919,41 @@ def _quantidade_planilha(valor) -> float | None:
     return numero
 
 
-def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> int:
-    antes = {}
-    for linha in original.itertuples(index=False):
-        antes[int(linha.linha)] = (
-            _texto_planilha(linha.situacao),
-            _quantidade_planilha(linha.quantidade),
-            _texto_planilha(linha.loja),
-        )
+def gravar_anotacoes_reposicao(editado: pd.DataFrame, original: pd.DataFrame) -> int:
+    if len(editado) != len(original):
+        return 0
     alterados = []
-    for item in editado.itertuples(index=False):
-        numero = int(item.Linha)
-        novo = (
-            _texto_planilha(item.Pedido),
-            _quantidade_planilha(item.Qtde),
-            _texto_planilha(item.Fornecedor),
-        )
-        anterior = antes.get(numero)
-        if anterior is None or anterior == novo:
+    for indice in range(len(original)):
+        base = original.iloc[indice]
+        item = editado.iloc[indice]
+        novo = {
+            "linha": int(base["linha"]),
+            "descricao": _texto_planilha(item.get("Peça")),
+            "codigo": _texto_planilha(item.get("Código")),
+            "quantidade": _quantidade_planilha(item.get("Qtde")),
+            "observacao": _texto_planilha(item.get("Nota")),
+            "loja": _texto_planilha(item.get("Onde pedir")),
+            "situacao": _texto_planilha(item.get("Pedido")),
+        }
+        anterior = {
+            "descricao": _texto_planilha(base["descricao"]),
+            "codigo": _texto_planilha(base["codigo"]),
+            "quantidade": _quantidade_planilha(base["quantidade"]),
+            "observacao": _texto_planilha(base["observacao"]),
+            "loja": _texto_planilha(base["loja"]),
+            "situacao": _texto_planilha(base["situacao"]),
+        }
+        if all(novo[campo] == anterior[campo] for campo in anterior):
             continue
-        if anterior[1] is not None and novo[1] is not None and round(anterior[1], 2) == round(novo[1], 2):
-            if anterior[0] == novo[0] and anterior[2] == novo[2]:
+        if (
+            novo["quantidade"] is not None
+            and anterior["quantidade"] is not None
+            and round(novo["quantidade"], 2) == round(anterior["quantidade"], 2)
+        ):
+            resto = [campo for campo in anterior if campo != "quantidade"]
+            if all(novo[campo] == anterior[campo] for campo in resto):
                 continue
-        alterados.append(
-            {"linha": numero, "situacao": novo[0], "quantidade": novo[1], "loja": novo[2]}
-        )
+        alterados.append(novo)
     if not alterados:
         return 0
     with engine().begin() as conn:
@@ -4944,7 +4961,8 @@ def gravar_pedido_fornecedor(editado: pd.DataFrame, original: pd.DataFrame) -> i
             text(
                 """
                 UPDATE painel_pedido_reposicao
-                SET situacao = :situacao, quantidade = :quantidade, loja = :loja
+                SET descricao = :descricao, codigo = :codigo, quantidade = :quantidade,
+                    observacao = :observacao, loja = :loja, situacao = :situacao
                 WHERE linha = :linha
                 """
             ),
@@ -4975,56 +4993,29 @@ def excluir_item_pedido() -> None:
     _atualizar_grade_pedidos()
 
 
-def _lancar_reposicao(marcacao: str) -> None:
-    lancar_item_pedido(
-        marcacao,
-        str(st.session_state.get("repo_codigo") or ""),
-        str(st.session_state.get("repo_descricao") or ""),
-        str(st.session_state.get("repo_observacao") or ""),
-    )
-    if st.session_state.get("repo_ok"):
-        st.session_state.repo_codigo = ""
-        st.session_state.repo_descricao = ""
-        st.session_state.repo_observacao = ""
-
-
 def tela_reposicao_estoque(interno: bool = False) -> None:
-    st.title("Pedido/Reposição de estoque")
-    st.caption("A lista guarda no máximo 500 lançamentos. Cada produto novo apaga o último.")
-    acao1, acao2 = st.columns([1, 1], vertical_alignment="center")
-    with acao1:
-        botao_copiar_link(url_painel_reposicao(), "painel")
-    if interno:
-        if acao2.button("Voltar", width="stretch", key="voltar_reposicao"):
-            st.session_state.ver_pedidos = False
+    st.title("Reposição de peças")
+    st.caption("Anote a peça que está acabando. A mais recente fica no topo. Em Pedido, escreva quando já tiver pedido.")
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if interno:
+            if st.button("Voltar", key="voltar_reposicao"):
+                st.session_state.ver_pedidos = False
+                st.rerun()
+        elif st.button("Voltar ao login", key="voltar_reposicao"):
+            st.query_params.clear()
             st.rerun()
-    elif acao2.button("Voltar ao login", width="stretch", key="voltar_reposicao"):
-        st.query_params.clear()
-        st.rerun()
+    with st.expander("Compartilhar o link"):
+        botao_copiar_link(url_painel_reposicao(), "painel")
     excluir_item_pedido()
-    st.subheader("Lançar produto")
-    st.caption("Clique em Reposição ou Vendido para gravar. O produto entra na primeira linha e o último da lista sai. Pedido, quantidade e fornecedor ficam para digitar na lista.")
-    campo_codigo, campo_descricao = st.columns(2)
-    campo_codigo.text_input("Código do produto", placeholder="INSERIR CÓDIGO", key="repo_codigo")
-    campo_descricao.text_input("Descrição", placeholder="EX: FILTRO", key="repo_descricao")
-    campo_descricao.text_input("Observação", placeholder="EX: PEDIR BOSCH", key="repo_observacao")
-    botao_re, botao_ve = st.columns(2)
-    botao_re.button(
-        "Reposição",
-        type="primary",
-        width="stretch",
-        key="repo_btn_re",
-        on_click=_lancar_reposicao,
-        args=("RE",),
-    )
-    botao_ve.button(
-        "Vendido",
-        type="primary",
-        width="stretch",
-        key="repo_btn_ve",
-        on_click=_lancar_reposicao,
-        args=("VE",),
-    )
+    with st.form("anotar_reposicao", clear_on_submit=True, border=True):
+        peca, codigo, qtde = st.columns([3.2, 1.3, 0.7], vertical_alignment="bottom")
+        descricao = peca.text_input("Peça", placeholder="Filtro, pastilha, vela...")
+        codigo_peca = codigo.text_input("Código", placeholder="Se tiver")
+        quantidade = qtde.number_input("Qtde", min_value=1, max_value=999, value=1, step=1)
+        nota = st.text_input("Nota", placeholder="Marca, carro ou urgente. Pode deixar em branco.")
+        anotar = st.form_submit_button("Anotar", type="primary", width="stretch")
+    if anotar:
+        lancar_item_pedido("RE", str(codigo_peca or ""), str(descricao or ""), str(nota or ""), float(quantidade))
     aviso = st.session_state.pop("repo_aviso", "")
     if aviso:
         st.warning(aviso)
@@ -5035,121 +5026,88 @@ def tela_reposicao_estoque(interno: bool = False) -> None:
         garantir_pedido_reposicao()
         frame = ler_pedidos_reposicao()
     except Exception:
-        st.info("A planilha de pedidos ainda não está disponível neste painel.")
+        st.info("A lista de reposição ainda não está disponível neste painel.", title="Reposição")
         return
     if frame.empty:
-        st.info("Nenhum item lançado ainda.")
+        st.info("Nenhuma peça anotada ainda. Digite a peça em cima e clique em Anotar.", title="Lista vazia")
         return
-    termo = st.text_input(
+    pedido_feito = frame["situacao"].fillna("").map(lambda valor: bool(str(valor).strip()))
+    falta = int((~pedido_feito).sum())
+    st.subheader(f"Para pedir ({inteiro(falta)})")
+    busca, mostrar = st.columns([2.2, 1.6], vertical_alignment="bottom")
+    termo = busca.text_input(
         "Pesquisar",
-        placeholder="Código, descrição, observação, marca ou fornecedor",
+        placeholder="Peça, código, nota ou onde pedir",
         key="busca_pedido_reposicao",
     ).strip()
-    lojas = {}
-    for nome in frame["loja"].dropna():
-        texto = str(nome).strip()
-        if texto:
-            lojas.setdefault(texto.casefold(), texto)
-    escolha = st.selectbox(
-        "Fornecedor",
-        ["Todas", *[lojas[chave] for chave in sorted(lojas)]],
-        key="loja_pedido_reposicao",
+    filtro = mostrar.segmented_control(
+        "Mostrar",
+        ["Ainda pedir", "Todas", "Já pedidas"],
+        default="Ainda pedir",
+        key="repo_filtro",
+        width="stretch",
     )
+    if filtro not in {"Ainda pedir", "Todas", "Já pedidas"}:
+        filtro = "Ainda pedir"
     visivel = frame
     if termo:
         alvo = termo.casefold()
-        colunas = ["marcacao", "situacao", "loja", "codigo", "descricao", "observacao", "marca", "marca_2", "marca_3", "marca_4"]
         mascara = False
-        for coluna in colunas:
+        for coluna in ("codigo", "descricao", "observacao", "loja", "situacao"):
             mascara = mascara | visivel[coluna].fillna("").map(lambda valor: alvo in str(valor).casefold())
-        mascara = mascara | visivel["marcacao"].map(lambda valor: alvo in rotulo_marcacao(valor).casefold())
         visivel = visivel[mascara]
-    if escolha != "Todas":
-        visivel = visivel[visivel["loja"].fillna("").map(lambda valor: str(valor).casefold() == escolha.casefold())]
-    st.caption(f"{inteiro(len(visivel))} itens, no máximo {inteiro(LIMITE_PEDIDOS_REPOSICAO)}. O lançamento novo entra na primeira linha.")
+    if filtro == "Ainda pedir":
+        visivel = visivel[visivel["situacao"].fillna("").map(lambda valor: not str(valor).strip())]
+    elif filtro == "Já pedidas":
+        visivel = visivel[visivel["situacao"].fillna("").map(lambda valor: bool(str(valor).strip()))]
+    if visivel.empty:
+        st.info("Nada nesta lista.")
+        return
+    st.caption(f"{inteiro(len(visivel))} nesta lista. A alteração de quantidade, nota, onde pedir ou pedido é gravada ao sair do campo.")
     st.session_state.repo_linhas_excluir = [int(valor) for valor in visivel["linha"].tolist()]
-    visivel = visivel.copy()
-    visivel["descricao"] = [
-        descricao_com_observacao(descricao, observacao)
-        for descricao, observacao in zip(visivel["descricao"], visivel["observacao"])
-    ]
-    visivel["marcacao"] = [rotulo_marcacao(valor) for valor in visivel["marcacao"]]
-    grade = visivel.rename(
-        columns={
-            "linha": "Linha",
-            "quantidade": "Qtde",
-            "marcacao": "RE/VE",
-            "situacao": "Pedido",
-            "loja": "Fornecedor",
-            "codigo": "Código",
-            "descricao": "Descrição",
-            "preco": "Preço",
-            "marca": "Marca",
-            "preco_2": "Preço 2",
-            "marca_2": "Marca 2",
-            "preco_3": "Preço 3",
-            "marca_3": "Marca 3",
-            "preco_4": "Preço 4",
-            "marca_4": "Marca 4",
+    base = visivel.reset_index(drop=True)
+    grade = pd.DataFrame(
+        {
+            "Excluir": "Excluir",
+            "Peça": base["descricao"].map(lambda valor: _texto_planilha(valor) or ""),
+            "Código": base["codigo"].map(lambda valor: _texto_planilha(valor) or ""),
+            "Qtde": base["quantidade"],
+            "Nota": base["observacao"].map(lambda valor: _texto_planilha(valor) or ""),
+            "Onde pedir": base["loja"].map(lambda valor: _texto_planilha(valor) or ""),
+            "Pedido": base["situacao"].map(lambda valor: _texto_planilha(valor) or ""),
         }
     )
-    grade.insert(0, "Excluir", "Excluir")
-    grade = grade[
-        [
-            "Excluir",
-            "Código",
-            "Descrição",
-            "RE/VE",
-            "Pedido",
-            "Qtde",
-            "Fornecedor",
-            "Preço",
-            "Marca",
-            "Preço 2",
-            "Marca 2",
-            "Preço 3",
-            "Marca 3",
-            "Preço 4",
-            "Marca 4",
-            "Linha",
-        ]
-    ]
     editado = st.data_editor(
-        pintar_vendido(grade),
+        grade,
         width="stretch",
         hide_index=True,
-        height=640,
-        row_height=ALTURA_LINHA_PLANILHA,
+        height=480,
         num_rows="fixed",
-        disabled=[coluna for coluna in grade.columns if coluna not in {"Pedido", "Qtde", "Fornecedor"}],
         column_config={
             "Excluir": st.column_config.ButtonColumn(
                 "Excluir",
                 width=72,
                 pinned=True,
-                help="Tira este produto da listagem",
+                help="Tira esta peça da lista",
                 on_click=excluir_item_pedido,
                 key="repo_click_excluir",
             ),
-            "Linha": st.column_config.NumberColumn("Linha", width="small"),
-            "Qtde": st.column_config.NumberColumn("Qtde", format="%.2f", min_value=0),
-            "Pedido": st.column_config.TextColumn("Pedido"),
-            "Fornecedor": st.column_config.TextColumn("Fornecedor"),
-            "Preço": st.column_config.NumberColumn("Preço", format="R$ %.2f"),
-            "Preço 2": st.column_config.NumberColumn("Preço 2", format="R$ %.2f"),
-            "Preço 3": st.column_config.NumberColumn("Preço 3", format="R$ %.2f"),
-            "Preço 4": st.column_config.NumberColumn("Preço 4", format="R$ %.2f"),
+            "Peça": st.column_config.TextColumn("Peça", width="large"),
+            "Código": st.column_config.TextColumn("Código", width="small"),
+            "Qtde": st.column_config.NumberColumn("Qtde", format="%.0f", min_value=0, width="small"),
+            "Nota": st.column_config.TextColumn("Nota", width="medium"),
+            "Onde pedir": st.column_config.TextColumn("Onde pedir", width="medium", help="Fornecedor ou loja, se já souber"),
+            "Pedido": st.column_config.TextColumn("Pedido", width="small", help="Em branco enquanto ainda precisa pedir"),
         },
-        key=f"editor_pedido_reposicao_qtde_{int(st.session_state.get('repo_grade_versao') or 0)}",
-        alt="Itens da planilha de pedidos",
+        key=(
+            "editor_pedido_reposicao_"
+            f"{int(st.session_state.get('repo_grade_versao') or 0)}_{filtro}_"
+            f"{hashlib.md5(','.join(str(int(valor)) for valor in base['linha']).encode()).hexdigest()[:12]}"
+        ),
+        alt="Peças anotadas para reposição",
     )
-    if st.button("Gravar pedido, quantidade e fornecedor", type="primary", key="gravar_pedido_fornecedor"):
-        gravados = gravar_pedido_fornecedor(editado, visivel)
-        if gravados:
-            st.session_state.repo_aviso = ""
-            st.rerun()
-        else:
-            st.info("Nenhuma alteração de pedido, quantidade ou fornecedor para gravar.")
+    if gravar_anotacoes_reposicao(editado, base):
+        st.rerun()
 
 
 def tela_acesso() -> None:
@@ -5560,7 +5518,7 @@ def tela_modulos() -> None:
             st.session_state.modulo = "pv"
             registrar_log("Acesso", f"Acessou o módulo {MODULO_PV}.", modulo=MODULO_PV)
             st.rerun()
-        if st.button("Pedido/Reposição  \nESTOQUE", key="mod_pedidos", type="primary", wrap=True):
+        if st.button("Reposição  \nPEÇAS", key="mod_pedidos", type="primary", wrap=True):
             abrir_painel_pedidos()
     if st.button("Sair", key="sair_modulos"):
         encerrar_sessao()
