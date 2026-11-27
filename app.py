@@ -5909,9 +5909,11 @@ def pedidos_do_termo(termo: str) -> list[str]:
                         "o.observacoes",
                         "o.problema",
                         "o.entrada",
+                        "o.funcionario",
+                        "o.cliente",
                     )
                 ),
-                (marca, marca, marca, marca, marca),
+                (marca, marca, marca, marca, marca, marca, marca),
             ),
         )
         _acumular_pedidos(
@@ -5924,9 +5926,16 @@ def pedidos_do_termo(termo: str) -> list[str]:
                 WHERE """
                 + " OR ".join(
                     comparar_busca(campo)
-                    for campo in ("f.placa", "f.placa_veiculo", "f.obs", "f.nome_cliente")
+                    for campo in (
+                        "f.placa",
+                        "f.placa_veiculo",
+                        "f.obs",
+                        "f.nome_cliente",
+                        "f.mecanico",
+                        "f.descricao",
+                    )
                 ),
-                (marca, marca, marca, marca),
+                (marca, marca, marca, marca, marca, marca),
             ),
         )
     return pedidos
@@ -8530,20 +8539,43 @@ def botoes_financeiro_next() -> str:
 
 
 def _opcoes_lancamento(tipo: str) -> list[tuple[str, str]]:
-    rotulo = "Contas a receber" if tipo == "receber" else "Contas a pagar"
+    del tipo
     return [
-        ("todos", "--> Todos <--"),
-        ("vencidas", f"{rotulo} vencidas"),
-        ("ate7", f"{rotulo} em até 7 dias"),
-        ("ate15", f"{rotulo} em até 15 dias"),
-        ("ate30", f"{rotulo} em até 30 dias"),
-        ("ate45", f"{rotulo} em até 45 dias"),
-        ("vencer", f"{rotulo} a vencer"),
-        ("efetivadas_dia", f"{rotulo} efetivadas no dia"),
-        ("vencer_dia", f"{rotulo} a vencer no dia"),
-        ("efetivadas", f"{rotulo} efetivadas"),
-        ("aberto", f"{rotulo} em aberto"),
+        ("todos", "Todas"),
+        ("vencidas", "Vencidas"),
+        ("ate7", "Até 7 dias"),
+        ("ate15", "Até 15 dias"),
+        ("ate30", "Até 30 dias"),
+        ("ate45", "Até 45 dias"),
+        ("vencer", "A vencer"),
+        ("efetivadas_dia", "Efetivadas hoje"),
+        ("vencer_dia", "A vencer hoje"),
+        ("efetivadas", "Efetivadas"),
+        ("aberto", "Em aberto"),
     ]
+
+
+def _status_conta(valor, opcoes: list[tuple[str, str]]) -> str:
+    rotulos = [rotulo for _chave, rotulo in opcoes]
+    if valor in rotulos:
+        return valor
+    texto = str(valor or "").casefold()
+    for antigo, novo in (
+        ("em até 7 dias", "Até 7 dias"),
+        ("em até 15 dias", "Até 15 dias"),
+        ("em até 30 dias", "Até 30 dias"),
+        ("em até 45 dias", "Até 45 dias"),
+        ("efetivadas no dia", "Efetivadas hoje"),
+        ("a vencer no dia", "A vencer hoje"),
+        ("em aberto", "Em aberto"),
+        ("efetivadas", "Efetivadas"),
+        ("vencidas", "Vencidas"),
+        ("a vencer", "A vencer"),
+        ("todos", "Todas"),
+    ):
+        if antigo in texto:
+            return novo
+    return rotulos[0]
 
 
 def _sql_opcao_lancamento(codigo: str, params: list) -> str:
@@ -8586,15 +8618,16 @@ def _limpar_busca_contas() -> None:
     st.session_state.nx_emis_ate = None
     st.session_state.nx_busca_hist = False
     st.session_state.nx_busca_feita = False
-    st.session_state.nx_opcao_receber = "--> Todos <--"
-    st.session_state.nx_opcao_pagar = "--> Todos <--"
+    st.session_state.nx_opcao_receber = "Todas"
+    st.session_state.nx_opcao_pagar = "Todas"
+    st.rerun()
 
 
 def _where_lancamento(tipo: str) -> tuple[str, list]:
     params: list = [tipo]
     where = " WHERE tipo = ?"
     opcoes = _opcoes_lancamento(tipo)
-    escolhida = st.session_state.get(f"nx_opcao_{tipo}") or opcoes[0][1]
+    escolhida = _status_conta(st.session_state.get(f"nx_opcao_{tipo}"), opcoes)
     codigo = next((chave for chave, rotulo in opcoes if rotulo == escolhida), "todos")
     where += _sql_opcao_lancamento(codigo, params)
     where += date_clause("vencimento", st.session_state.get("nx_venc_de"), st.session_state.get("nx_venc_ate"), params)
@@ -8603,19 +8636,7 @@ def _where_lancamento(tipo: str) -> tuple[str, list]:
     )
     pessoa = str(st.session_state.get("nx_pessoa") or "").strip()
     if pessoa:
-        if st.session_state.get("nx_busca_hist"):
-            where += " AND (" + comparar_busca("historico")
-            params.append(like(pessoa))
-            where += " OR " + clausula_documento_financeiro(pessoa, params) + ")"
-        else:
-            where += " AND " + clausula_documento_financeiro(pessoa, params)
-    duplicata = str(st.session_state.get("nx_duplicata") or "").strip()
-    if duplicata:
-        where += " AND " + comparar_busca("duplicata")
-        params.append(like(duplicata))
-    documento = str(st.session_state.get("nx_documento") or "").strip()
-    if documento:
-        where += " AND " + clausula_documento_financeiro(documento, params)
+        where += " AND " + clausula_documento_financeiro(pessoa, params)
     return where, params
 
 
@@ -8941,104 +8962,75 @@ def dialogo_os_top() -> None:
     botao_oficina_top("link_dialogo_os_top")
 
 
+def _sair_contas() -> None:
+    st.session_state.tela_next = "visao"
+    st.session_state.menu_next_aberto = "Início"
+    st.session_state.tela_next_rotulo = "Início"
+
+
 def painel_contas_next() -> None:
-    st.subheader("Lançamentos a pagar/receber")
-    for chave in (
-        "nx_pessoa",
-        "nx_duplicata",
-        "nx_documento",
-        "nx_venc_de",
-        "nx_venc_ate",
-        "nx_baixa_de",
-        "nx_baixa_ate",
-        "nx_emis_de",
-        "nx_emis_ate",
-    ):
-        st.session_state.setdefault(chave, "" if chave in {"nx_pessoa", "nx_duplicata", "nx_documento"} else None)
-    st.session_state.setdefault("nx_busca_hist", False)
+    for chave in ("nx_pessoa", "nx_venc_de", "nx_venc_ate", "nx_baixa_de", "nx_baixa_ate"):
+        st.session_state.setdefault(chave, "" if chave == "nx_pessoa" else None)
     st.session_state.setdefault("nx_busca_feita", False)
     if st.session_state.get("nx_visualizar") not in {"Contas a pagar", "Contas a receber"}:
         lista = st.session_state.get("next_fin_lista") or "receber"
         st.session_state.nx_visualizar = "Contas a pagar" if lista == "pagar" else "Contas a receber"
-    visual, filtro = st.columns([1, 4], gap="medium")
-    with visual:
-        with st.container(border=True):
-            st.markdown("**Visualizar**")
-            escolha = st.radio(
-                "Tipo de conta",
-                ["Contas a pagar", "Contas a receber"],
-                key="nx_visualizar",
-                label_visibility="collapsed",
-            )
+    cabeca, conta, voltar = st.columns([4.2, 1.5, 0.8], vertical_alignment="center")
+    cabeca.subheader("Lançamentos")
+    escolha = conta.segmented_control(
+        "Conta",
+        ["Contas a pagar", "Contas a receber"],
+        key="nx_visualizar",
+        format_func=lambda item: "Pagar" if item == "Contas a pagar" else "Receber",
+        label_visibility="collapsed",
+        required=True,
+        width="stretch",
+    )
+    voltar.button("Voltar", width="stretch", on_click=_sair_contas)
     tipo = "pagar" if escolha == "Contas a pagar" else "receber"
     st.session_state.next_fin_lista = tipo
     opcoes = _opcoes_lancamento(tipo)
-    st.session_state.setdefault(f"nx_opcao_{tipo}", opcoes[0][1])
-    with filtro:
-        with st.container(border=True):
-            st.markdown("**Filtro**")
-            esquerda, direita = st.columns(2)
-            with esquerda:
-                st.selectbox("Opções", [rotulo for _chave, rotulo in opcoes], key=f"nx_opcao_{tipo}")
-            with direita:
-                st.text_input("Duplicata", key="nx_duplicata")
-            d1, d2, d3, d4 = st.columns(4)
-            d1.date_input("Vencimento de", format="DD/MM/YYYY", key="nx_venc_de")
-            d2.date_input("Vencimento até", format="DD/MM/YYYY", key="nx_venc_ate")
-            d3.date_input("Baixa de", format="DD/MM/YYYY", key="nx_baixa_de")
-            d4.date_input("Baixa até", format="DD/MM/YYYY", key="nx_baixa_ate")
-            e1, e2, e3 = st.columns(3)
-            e1.date_input("Emissão de", format="DD/MM/YYYY", key="nx_emis_de")
-            e2.date_input("Emissão até", format="DD/MM/YYYY", key="nx_emis_ate")
-            e3.selectbox("Espécie", ["--> Todos <--"], key="nx_especie")
-            p1, p2 = st.columns([3, 1], vertical_alignment="bottom")
-            rotulo_pessoa = "Histórico" if st.session_state.get("nx_busca_hist") else "Cliente"
-            p1.text_input(
-                rotulo_pessoa,
+    st.session_state[f"nx_opcao_{tipo}"] = _status_conta(st.session_state.get(f"nx_opcao_{tipo}"), opcoes)
+    with st.container(border=True):
+        with st.form("nx_filtro_contas", border=False):
+            busca, status = st.columns([3.2, 1.3], vertical_alignment="bottom")
+            busca.text_input(
+                "Buscar",
                 key="nx_pessoa",
-                help="Pedido, O.S., orçamento, placa, observação, cliente ou histórico",
+                placeholder=(
+                    "Fornecedor, nota fiscal ou outro termo"
+                    if tipo == "pagar"
+                    else "Cliente, placa, O.S., pedido, orçamento, obs, serviço ou mecânico"
+                ),
             )
-            if p2.button("Histórico", key="nx_alternar_hist", width="stretch"):
-                st.session_state.nx_busca_hist = not st.session_state.nx_busca_hist
-                st.rerun()
-            b1, b2, b3 = st.columns(3)
-            b1.selectbox("Plano de contas", ["--> Todos <--"], key="nx_plano")
-            b2.selectbox("Banco/agência/conta", ["--> Todos <--"], key="nx_banco")
-            b3.selectbox("Frequência do pagamento", ["--> Todos <--"], key="nx_freq")
-            st.text_input(
-                "Documento",
-                key="nx_documento",
-                help="Código do lançamento, pedido, O.S., orçamento, placa ou observação",
+            status.selectbox(
+                "Status",
+                [rotulo for _chave, rotulo in opcoes],
+                key=f"nx_opcao_{tipo}",
             )
-    acao1, acao2, acao3, acao4 = st.columns(4)
-    if acao1.button("Busca", type="primary", width="stretch"):
+            venc_de, venc_ate, baixa_de, baixa_ate, buscar, limpar = st.columns(
+                [1, 1, 1, 1, 0.7, 0.7], vertical_alignment="bottom"
+            )
+            venc_de.date_input("Vencimento de", format="DD/MM/YYYY", key="nx_venc_de")
+            venc_ate.date_input("Vencimento até", format="DD/MM/YYYY", key="nx_venc_ate")
+            baixa_de.date_input("Baixa de", format="DD/MM/YYYY", key="nx_baixa_de")
+            baixa_ate.date_input("Baixa até", format="DD/MM/YYYY", key="nx_baixa_ate")
+            buscou = buscar.form_submit_button("Buscar", type="primary", width="stretch")
+            limpar.form_submit_button("Limpar", width="stretch", on_click=_limpar_busca_contas)
+        st.caption(
+            "Fornecedor, nota fiscal ou histórico. Combine com vencimento, baixa e status."
+            if tipo == "pagar"
+            else "Cliente, placa, O.S., pedido, orçamento, observação, serviço ou mecânico. "
+            "Combine com vencimento, baixa e status."
+        )
+    if buscou:
         st.session_state.nx_busca_feita = True
         st.session_state.nx_busca_tipo = tipo
-    acao2.button("Canc", width="stretch", on_click=_limpar_busca_contas)
-    with acao3.popover("Ajuda", width="stretch"):
-        st.markdown(
-            "Todos lista o movimento inteiro. Vencidas, em até N dias, a vencer e em aberto "
-            "olham o vencimento das contas que ainda não foram quitadas. Efetivadas são as quitadas. "
-            "Efetivadas no dia usa a data da baixa. Cliente, documento e a pesquisa de baixo encontram "
-            "o pedido, a O.S., o orçamento, a placa, a observação, o cliente e o histórico. "
-            "Duplicata procura a duplicata. "
-            "Período de vencimento e período de baixa restringem as datas. "
-            "Data de emissão, plano de contas, espécie, banco e frequência não vieram na planilha, "
-            "então permanecem em todos."
-        )
-    if acao4.button("Sair", width="stretch"):
-        st.session_state.tela_next = "visao"
-        st.session_state.menu_next_aberto = "Início"
-        st.session_state.tela_next_rotulo = "Início"
-        st.rerun()
-    if st.session_state.get("nx_emis_de") or st.session_state.get("nx_emis_ate"):
-        st.info("A planilha não trouxe a data de emissão. Esse período não entra na busca.")
     colunas = [
         "Código",
         "Duplicata",
         "Data Vencto.",
         "Nome/Razão Social",
-        "Data Emissão",
         "Histórico Lançamento",
         "Data pagto.",
         "Valor da dívida",
@@ -9112,7 +9104,6 @@ def painel_contas_next() -> None:
                 else {}
             ),
             "Nome/Razão Social": frame["nome"].map(lambda valor: texto_limpo(valor) or "—"),
-            "Data Emissão": "",
             "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
             "Data pagto.": frame["data_pagamento"].map(data_br),
             "Valor da dívida": divida,
@@ -9167,9 +9158,8 @@ def painel_contas_next() -> None:
                 "Duplicata": st.column_config.TextColumn("Duplicata", width=72),
                 "Data Vencto.": st.column_config.TextColumn("Data Vencto.", width=86),
                 "Dias vencidos": st.column_config.NumberColumn("Dias vencidos", format="%d", width=56),
-                "Nome/Razão Social": st.column_config.TextColumn("Nome/Razão Social", width=120),
-                "Data Emissão": st.column_config.TextColumn("Data Emissão", width=78),
-                "Histórico Lançamento": st.column_config.TextColumn("Histórico Lançamento", width=140),
+                "Nome/Razão Social": st.column_config.TextColumn("Nome/Razão Social", width=140),
+                "Histórico Lançamento": st.column_config.TextColumn("Histórico Lançamento", width=160),
                 "Data pagto.": st.column_config.TextColumn("Data pagto.", width=78),
                 "Valor da dívida": st.column_config.NumberColumn("Valor da dívida", format="R$ %.2f", width=86),
                 "Valor da Baixa": st.column_config.NumberColumn("Valor da Baixa", format="R$ %.2f", width=82),
@@ -9280,7 +9270,7 @@ def abrir_financeiro_vinculado(termo: str) -> None:
     st.session_state.nx_baixa_ate = None
     st.session_state.nx_emis_de = None
     st.session_state.nx_emis_ate = None
-    st.session_state.nx_opcao_receber = "--> Todos <--"
+    st.session_state.nx_opcao_receber = "Todas"
     st.session_state.nx_busca_feita = True
     st.session_state.nx_busca_tipo = "receber"
 
