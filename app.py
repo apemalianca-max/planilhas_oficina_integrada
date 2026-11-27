@@ -9128,14 +9128,19 @@ def painel_contas_next() -> None:
           font-size: 1.15rem !important;
           font-weight: 800 !important;
         }
+        .st-key-ultimas_nx_contas button,
+        .st-key-ultimas_nx_contas button p {
+          font-size: 1.35rem !important;
+          font-weight: 800 !important;
+        }
         .st-key-ultimas_nx_contas button {
-          min-height: 3.1rem;
-          font-weight: 700 !important;
+          min-height: 3.4rem;
+          white-space: nowrap;
         }
         </style>
         """
     )
-    cabeca, ultimas, conta, voltar = st.columns([1.55, 1.35, 2.5, 0.7], vertical_alignment="center")
+    cabeca, ultimas, conta, voltar = st.columns([1.35, 1.9, 2.4, 0.65], vertical_alignment="center")
     cabeca.subheader("Lançamentos")
     atual = st.session_state.nx_visualizar
     if ultimas.button("Últimas baixas", key="ultimas_nx_contas", width="stretch"):
