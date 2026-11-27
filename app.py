@@ -265,6 +265,27 @@ def comparar_busca(expressao: str) -> str:
     )
 
 
+def comparar_compacto(expressao: str) -> str:
+    return (
+        "translate(lower(COALESCE(CAST("
+        + expressao
+        + " AS TEXT), '')), '"
+        + _ACENTOS
+        + "-./ ', '"
+        + _SEM_ACENTO
+        + "') LIKE ? ESCAPE '\\'"
+    )
+
+
+def _compacto_busca(texto: str) -> str:
+    return "".join(caractere for caractere in sem_acento(texto) if caractere.isalnum())
+
+
+def _parece_placa(texto: str) -> bool:
+    compacto = _compacto_busca(texto)
+    return len(compacto) >= 5 and any(c.isalpha() for c in compacto) and any(c.isdigit() for c in compacto)
+
+
 def contem_termo(serie: pd.Series, termo: str) -> pd.Series:
     alvo = sem_acento(termo.strip())
     if not alvo:
@@ -5927,6 +5948,20 @@ def pedidos_do_termo(termo: str) -> list[str]:
                 (marca, marca),
             ),
         )
+        campos_os = (
+            "o.veiculo",
+            "o.chassi",
+            "o.observacoes",
+            "o.problema",
+            "o.entrada",
+            "o.funcionario",
+            "o.cliente",
+        )
+        condicoes_os = [comparar_busca(campo) for campo in campos_os]
+        marcas_os = [marca] * len(campos_os)
+        if _parece_placa(item):
+            condicoes_os.append(comparar_compacto("o.veiculo"))
+            marcas_os.append(like(_compacto_busca(item)))
         _acumular_pedidos(
             pedidos,
             query(
@@ -5935,21 +5970,24 @@ def pedidos_do_termo(termo: str) -> list[str]:
                 FROM next_pedido_detalhe d
                 JOIN next_os o ON ltrim(trim(o.codigo), '0') = ltrim(trim(d.codos), '0')
                 WHERE """
-                + " OR ".join(
-                    comparar_busca(campo)
-                    for campo in (
-                        "o.veiculo",
-                        "o.chassi",
-                        "o.observacoes",
-                        "o.problema",
-                        "o.entrada",
-                        "o.funcionario",
-                        "o.cliente",
-                    )
-                ),
-                (marca, marca, marca, marca, marca, marca, marca),
+                + " OR ".join(condicoes_os),
+                tuple(marcas_os),
             ),
         )
+        campos_oficina = (
+            "f.placa",
+            "f.placa_veiculo",
+            "f.obs",
+            "f.nome_cliente",
+            "f.mecanico",
+            "f.descricao",
+        )
+        condicoes_oficina = [comparar_busca(campo) for campo in campos_oficina]
+        marcas_oficina = [marca] * len(campos_oficina)
+        if _parece_placa(item):
+            condicoes_oficina.append(comparar_compacto("f.placa"))
+            condicoes_oficina.append(comparar_compacto("f.placa_veiculo"))
+            marcas_oficina.extend((like(_compacto_busca(item)), like(_compacto_busca(item))))
         _acumular_pedidos(
             pedidos,
             query(
@@ -5958,18 +5996,8 @@ def pedidos_do_termo(termo: str) -> list[str]:
                 FROM next_pedido_detalhe d
                 JOIN oficina_os f ON ltrim(CAST(f.id_os AS TEXT), '0') = ltrim(trim(d.os_oficina), '0')
                 WHERE """
-                + " OR ".join(
-                    comparar_busca(campo)
-                    for campo in (
-                        "f.placa",
-                        "f.placa_veiculo",
-                        "f.obs",
-                        "f.nome_cliente",
-                        "f.mecanico",
-                        "f.descricao",
-                    )
-                ),
-                (marca, marca, marca, marca, marca, marca),
+                + " OR ".join(condicoes_oficina),
+                tuple(marcas_oficina),
             ),
         )
     return pedidos
@@ -5985,8 +6013,16 @@ def clausula_documento_financeiro(termo: str, params: list) -> str:
         for campo in ("codigo", "duplicata", "nome", "historico", "obs_conta"):
             partes.append(comparar_busca(campo))
             params.append(like(item))
-        if item.isdigit():
-            numero = str(int(item))
+        if _parece_placa(item):
+            for campo in ("nome", "historico", "obs_conta"):
+                partes.append(comparar_compacto(campo))
+                params.append(like(_compacto_busca(item)))
+        numero_item = item
+        parcela = re.fullmatch(r"(\d+)/(\d{1,2})", item)
+        if parcela:
+            numero_item = parcela.group(1)
+        if numero_item.isdigit():
+            numero = str(int(numero_item))
             partes.append(f"{_PEDIDO_NO_HISTORICO} = ?")
             params.append(numero)
             partes.append("ltrim(COALESCE(codigo, ''), '0') = ?")
@@ -8657,14 +8693,48 @@ def _limpar_busca_contas() -> None:
     st.rerun()
 
 
-def _palavras_busca(texto: str) -> list[str]:
-    ignorar = {"de", "da", "do", "das", "dos", "e", "a", "o", "os", "as", "em", "no", "na", "para", "com"}
-    palavras = [
-        parte
-        for parte in sem_acento(texto).split()
-        if len(parte) >= 2 and parte not in ignorar
-    ]
-    return palavras or [texto.strip()]
+def _termos_combinados(texto: str) -> list[str]:
+    bruto = sem_acento(texto).strip()
+    if not bruto:
+        return []
+    ignorar = {
+        "de", "da", "do", "das", "dos", "e", "a", "o", "os", "as", "em", "no", "na", "para", "com",
+        "o.s", "o.s.", "pedido", "ped", "orcamento", "orc", "placa", "cliente", "fornecedor",
+        "mecanico", "servico", "descricao", "historico", "obs", "observacao", "nf", "nfe", "nro",
+        "numero", "doc", "documento",
+    }
+    bruto = bruto.replace("o.s.", " ").replace("o.s", " ")
+    bruto = re.sub(r"[;+|]+", " ", bruto)
+    bruto = re.sub(r"\s+e\s+", " ", bruto)
+    extra = re.findall(
+        r"\b(?:os|pedido|ped|orcamento|orc|placa|nf|nfe|nro|nota)\s*[:.]?\s*(\d+)\b",
+        bruto,
+    )
+    extra += re.findall(r"\b(?:os|pedido|ped|orcamento|orc|nf|nfe|nro)(\d+)\b", bruto)
+    bruto = re.sub(r"\b(?:os|pedido|ped|orcamento|orc|placa|nf|nfe|nro)\s*[:.]?\s*(?=\d)", " ", bruto)
+    bruto = re.sub(r"\b(?:os|pedido|ped|orcamento|orc|nf|nfe|nro)(?=\d)", " ", bruto)
+    pedacos: list[str] = []
+    for parte in re.split(r"[\s,]+", bruto):
+        parte = parte.strip(" .:-#")
+        if not parte:
+            continue
+        if re.fullmatch(r"\d{5,}/\d{1,2}", parte):
+            pedacos.append(parte.split("/", 1)[0])
+            continue
+        if re.fullmatch(r"\d{3,}/\d{3,}", parte):
+            pedacos.extend(parte.split("/"))
+            continue
+        pedacos.append(parte)
+    pedacos.extend(extra)
+    termos: list[str] = []
+    for parte in pedacos:
+        if parte in ignorar or (len(parte) < 2 and not parte.isdigit()):
+            continue
+        if parte not in termos:
+            termos.append(parte)
+    if termos:
+        return termos
+    return [texto.strip()] if texto.strip() else []
 
 
 def _where_lancamento(tipo: str) -> tuple[str, list]:
@@ -8680,7 +8750,7 @@ def _where_lancamento(tipo: str) -> tuple[str, list]:
     )
     pessoa = str(st.session_state.get("nx_pessoa") or "").strip()
     if pessoa:
-        for palavra in _palavras_busca(pessoa):
+        for palavra in _termos_combinados(pessoa):
             where += " AND " + clausula_documento_financeiro(palavra, params)
     return where, params
 
@@ -8897,7 +8967,7 @@ def _painel_operacao_contas(tipo: str) -> None:
     f1, f2, f3 = st.columns([2, 1, 1])
     texto = f1.text_input(
         "Pesquisar",
-        placeholder="Código, nome, histórico, duplicata ou observação",
+        placeholder="Código, nome, nota, histórico ou observação. Pode combinar.",
         key="busca_next_fin",
         persist_state="session",
     )
@@ -8934,7 +9004,8 @@ def _painel_operacao_contas(tipo: str) -> None:
     params: list = [tipo]
     where = " WHERE tipo = ?"
     where += clausula_pesquisa_next(termo, params)
-    where += text_clause(["codigo", "nome", "historico", "duplicata", "obs_conta"], texto, params)
+    for palavra in _termos_combinados(texto):
+        where += " AND " + clausula_documento_financeiro(palavra, params)
     where += in_clause("quitado", quitado, params)
     where += date_clause("vencimento", inicio, fim, params)
     totais = query(
@@ -9088,9 +9159,9 @@ def painel_contas_next() -> None:
                 "Buscar",
                 key="nx_pessoa",
                 placeholder=(
-                    "Fornecedor, nota fiscal ou termo do histórico"
+                    "Fornecedor, nota e histórico. Pode combinar."
                     if tipo == "pagar"
-                    else "Cliente, placa, O.S., pedido, orçamento, descrição, serviço ou mecânico"
+                    else "Cliente, placa, O.S. e pedido. Pode combinar."
                 ),
             )
             status.selectbox(
@@ -9108,10 +9179,10 @@ def painel_contas_next() -> None:
             buscou = buscar.form_submit_button("Buscar", type="primary", width="stretch")
             limpar.form_submit_button("Limpar", width="stretch", on_click=_limpar_busca_contas)
         st.caption(
-            "Fornecedor, nota fiscal ou qualquer termo do histórico. Combine com vencimento, baixa e status."
+            "Combine fornecedor, número da nota e termos do histórico. Também combina com vencimento, baixa e status."
             if tipo == "pagar"
-            else "Cliente, placa, O.S., pedido, orçamento, observação, serviço, mecânico ou termo da descrição. "
-            "Combine com vencimento, baixa e status."
+            else "Combine cliente, placa, número da O.S., do pedido e do orçamento, serviço ou mecânico. "
+            "Também combina com vencimento, baixa e status."
         )
     if buscou:
         st.session_state.nx_busca_feita = True
