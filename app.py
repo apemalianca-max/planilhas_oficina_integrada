@@ -9013,13 +9013,19 @@ def painel_contas_next() -> None:
           font-size: 1.15rem !important;
           font-weight: 800 !important;
         }
+        .st-key-ultimas_nx_contas button {
+          min-height: 3.1rem;
+          font-weight: 700 !important;
+        }
         </style>
         """
     )
-    cabeca, conta, voltar = st.columns([2.2, 2.8, 0.7], vertical_alignment="center")
+    cabeca, ultimas, conta, voltar = st.columns([1.55, 1.35, 2.5, 0.7], vertical_alignment="center")
     cabeca.subheader("Lançamentos")
-    pagar, receber = conta.columns(2, vertical_alignment="center")
     atual = st.session_state.nx_visualizar
+    if ultimas.button("Últimas baixas", key="ultimas_nx_contas", width="stretch"):
+        st.session_state.ultimas_lista = "next:pagar" if atual == "Contas a pagar" else "next:receber"
+    pagar, receber = conta.columns(2, vertical_alignment="center")
     pagar.button(
         "Pagar",
         key="nx_btn_pagar",
