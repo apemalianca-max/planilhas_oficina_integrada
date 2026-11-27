@@ -8623,6 +8623,16 @@ def _limpar_busca_contas() -> None:
     st.rerun()
 
 
+def _palavras_busca(texto: str) -> list[str]:
+    ignorar = {"de", "da", "do", "das", "dos", "e", "a", "o", "os", "as", "em", "no", "na", "para", "com"}
+    palavras = [
+        parte
+        for parte in sem_acento(texto).split()
+        if len(parte) >= 2 and parte not in ignorar
+    ]
+    return palavras or [texto.strip()]
+
+
 def _where_lancamento(tipo: str) -> tuple[str, list]:
     params: list = [tipo]
     where = " WHERE tipo = ?"
@@ -8636,7 +8646,8 @@ def _where_lancamento(tipo: str) -> tuple[str, list]:
     )
     pessoa = str(st.session_state.get("nx_pessoa") or "").strip()
     if pessoa:
-        where += " AND " + clausula_documento_financeiro(pessoa, params)
+        for palavra in _palavras_busca(pessoa):
+            where += " AND " + clausula_documento_financeiro(palavra, params)
     return where, params
 
 
@@ -8750,7 +8761,11 @@ def _painel_operacao_contas(tipo: str) -> None:
     if tipo == "receber":
         st.caption("Na busca, o valor do cliente fica separado em contas vencidas e contas a vencer.")
         mostrar_totais_cliente(abertas)
-    coluna_vencidas, coluna_avencer = st.columns(2, gap="medium")
+    if tipo == "receber":
+        coluna_vencidas = st.container()
+        coluna_avencer = st.container()
+    else:
+        coluna_vencidas, coluna_avencer = st.columns(2, gap="medium")
     with coluna_vencidas:
         st.html('<div id="next-vencidas" style="scroll-margin-top:80px"></div>')
         titulo_central(nome_lista_next(tipo, True))
@@ -9033,9 +9048,9 @@ def painel_contas_next() -> None:
                 "Buscar",
                 key="nx_pessoa",
                 placeholder=(
-                    "Fornecedor, nota fiscal ou outro termo"
+                    "Fornecedor, nota fiscal ou termo do histórico"
                     if tipo == "pagar"
-                    else "Cliente, placa, O.S., pedido, orçamento, obs, serviço ou mecânico"
+                    else "Cliente, placa, O.S., pedido, orçamento, descrição, serviço ou mecânico"
                 ),
             )
             status.selectbox(
@@ -9053,9 +9068,9 @@ def painel_contas_next() -> None:
             buscou = buscar.form_submit_button("Buscar", type="primary", width="stretch")
             limpar.form_submit_button("Limpar", width="stretch", on_click=_limpar_busca_contas)
         st.caption(
-            "Fornecedor, nota fiscal ou histórico. Combine com vencimento, baixa e status."
+            "Fornecedor, nota fiscal ou qualquer termo do histórico. Combine com vencimento, baixa e status."
             if tipo == "pagar"
-            else "Cliente, placa, O.S., pedido, orçamento, observação, serviço ou mecânico. "
+            else "Cliente, placa, O.S., pedido, orçamento, observação, serviço, mecânico ou termo da descrição. "
             "Combine com vencimento, baixa e status."
         )
     if buscou:
@@ -9090,13 +9105,27 @@ def painel_contas_next() -> None:
             frame = ordenar_contas_receber(
                 frame, manter_aberto=frame["_aberto_vinculo"].tolist()
             )
-        st.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
         pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
         baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
         divida = pd.to_numeric(frame["valor_liquido"], errors="coerce").fillna(0)
         quitado_flag = frame["quitado"].map(lambda valor: str(valor or "").strip().casefold() == "sim")
         if "_aberto_vinculo" in frame.columns:
             quitado_flag = [not bool(valor) for valor in frame["_aberto_vinculo"].tolist()]
+        dias_resultado = [
+            dias_em_atraso(vencimento, "Nao" if not flag else "Sim")
+            for vencimento, flag in zip(frame["vencimento"], quitado_flag, strict=True)
+        ]
+        mascara_vencido = pd.Series([dia is not None for dia in dias_resultado], index=divida.index)
+        vencido_valor = float(divida[mascara_vencido].sum()) if len(divida) else 0.0
+        aberto_valor = float(divida[~mascara_vencido].sum()) if len(divida) else 0.0
+        titulo_busca, total_vencido, total_aberto = st.columns([2.2, 1.5, 1.7], vertical_alignment="center")
+        titulo_busca.markdown(f"**Registros encontrados ({inteiro(len(frame))})**")
+        total_vencido.markdown(
+            f":red[**Vencidos** {inteiro(int(mascara_vencido.sum()))} · {brl(vencido_valor)}]"
+        )
+        total_aberto.markdown(
+            f"**Não vencidos** {inteiro(int((~mascara_vencido).sum()))} · {brl(aberto_valor)}"
+        )
         pedidos = [numero_pedido_texto(valor) for valor in frame["historico"].tolist()]
         st.session_state.nx_ids_lancamento = [int(valor) for valor in frame["id"].tolist()]
         st.session_state.nx_modo_lancamento = ["ver" if flag else "baixar" for flag in quitado_flag]
@@ -9106,24 +9135,7 @@ def painel_contas_next() -> None:
             "Código": frame["codigo"].map(lambda valor: texto_limpo(valor) or "—"),
             "Duplicata": frame["duplicata"].map(lambda valor: texto_limpo(valor) or "—"),
             "Data Vencto.": frame["vencimento"].map(data_br),
-            **(
-                {
-                    "Dias vencidos": [
-                        dias_em_atraso(
-                            vencimento,
-                            "Nao" if aberto else situacao,
-                        )
-                        for vencimento, situacao, aberto in zip(
-                            frame["vencimento"],
-                            frame["quitado"],
-                            frame["_aberto_vinculo"] if "_aberto_vinculo" in frame.columns else [False] * len(frame),
-                            strict=True,
-                        )
-                    ]
-                }
-                if tipo == "receber"
-                else {}
-            ),
+            "Dias vencidos": dias_resultado,
             "Nome/Razão Social": frame["nome"].map(lambda valor: texto_limpo(valor) or "—"),
             "Histórico Lançamento": frame["historico"].map(lambda valor: texto_limpo(valor) or "—"),
             "Data pagto.": frame["data_pagamento"].map(data_br),
@@ -9163,11 +9175,12 @@ def painel_contas_next() -> None:
         if tipo == "receber" and "O. TOP" in visivel.columns:
             tabela = visivel.copy()
             tabela["O. TOP"] = links_os_top(tabela["O. TOP"].tolist())
-        if tipo == "receber" and "Dias vencidos" in visivel.columns:
+        if "Dias vencidos" in visivel.columns:
             tabela = pintar_dias_vencidos(
                 tabela,
                 "Dias vencidos",
                 {"Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Documento"},
+                VERMELHO,
             )
         mostrar_planilha(
             tabela,
