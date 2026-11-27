@@ -6072,7 +6072,10 @@ def clausula_documento_financeiro(termo: str, params: list) -> str:
             partes.append("ltrim(split_part(COALESCE(duplicata, ''), '/', 1), '0') = ?")
             params.append(numero)
         valor = _valor_busca(item)
-        if valor is not None:
+        if valor is not None and item.isdigit():
+            partes.append("COALESCE(valor_liquido, 0) >= ? AND COALESCE(valor_liquido, 0) < ?")
+            params.extend((valor, valor + 1))
+        elif valor is not None:
             partes.append("ABS(COALESCE(valor_liquido, 0) - ?) < 0.005")
             params.append(valor)
     if pedidos:
