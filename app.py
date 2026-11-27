@@ -8667,7 +8667,7 @@ def _html_lancamentos(frame: pd.DataFrame, titulo: str) -> str:
 
 
 def _painel_operacao_contas(tipo: str) -> None:
-    termo = pesquisa_next("fin")
+    termo = ""
     params_busca: list = []
     filtro = clausula_pesquisa_next(termo, params_busca)
     limite_recente = (date.today() - timedelta(days=DIAS_EDICAO_BAIXA)).isoformat()
@@ -8687,7 +8687,6 @@ def _painel_operacao_contas(tipo: str) -> None:
         """,
         (tipo,),
     )
-    mostrar_lembrete_next(tipo)
     abertas = query(
         f"""
         SELECT id, codigo, {descricao_sql} AS descricao,
@@ -8962,6 +8961,14 @@ def dialogo_os_top() -> None:
     botao_oficina_top("link_dialogo_os_top")
 
 
+def _escolher_conta(conta: str) -> None:
+    if st.session_state.get("nx_visualizar") == conta:
+        return
+    st.session_state.nx_visualizar = conta
+    st.session_state.next_fin_lista = "pagar" if conta == "Contas a pagar" else "receber"
+    st.rerun()
+
+
 def _sair_contas() -> None:
     st.session_state.tela_next = "visao"
     st.session_state.menu_next_aberto = "Início"
@@ -8975,19 +8982,47 @@ def painel_contas_next() -> None:
     if st.session_state.get("nx_visualizar") not in {"Contas a pagar", "Contas a receber"}:
         lista = st.session_state.get("next_fin_lista") or "receber"
         st.session_state.nx_visualizar = "Contas a pagar" if lista == "pagar" else "Contas a receber"
-    cabeca, conta, voltar = st.columns([4.2, 1.5, 0.8], vertical_alignment="center")
+    st.html(
+        """
+        <style>
+        .st-key-nx_btn_pagar button,
+        .st-key-nx_btn_receber button {
+          min-height: 3.1rem;
+          font-size: 1.15rem !important;
+          font-weight: 800 !important;
+          letter-spacing: 0.03em;
+          border-width: 2px !important;
+        }
+        .st-key-nx_btn_pagar button p,
+        .st-key-nx_btn_receber button p {
+          font-size: 1.15rem !important;
+          font-weight: 800 !important;
+        }
+        </style>
+        """
+    )
+    cabeca, conta, voltar = st.columns([2.2, 2.8, 0.7], vertical_alignment="center")
     cabeca.subheader("Lançamentos")
-    escolha = conta.segmented_control(
-        "Conta",
-        ["Contas a pagar", "Contas a receber"],
-        key="nx_visualizar",
-        format_func=lambda item: "Pagar" if item == "Contas a pagar" else "Receber",
-        label_visibility="collapsed",
-        required=True,
+    pagar, receber = conta.columns(2, vertical_alignment="center")
+    atual = st.session_state.nx_visualizar
+    pagar.button(
+        "Pagar",
+        key="nx_btn_pagar",
+        type="primary" if atual == "Contas a pagar" else "secondary",
         width="stretch",
+        on_click=_escolher_conta,
+        args=("Contas a pagar",),
+    )
+    receber.button(
+        "Receber",
+        key="nx_btn_receber",
+        type="primary" if atual == "Contas a receber" else "secondary",
+        width="stretch",
+        on_click=_escolher_conta,
+        args=("Contas a receber",),
     )
     voltar.button("Voltar", width="stretch", on_click=_sair_contas)
-    tipo = "pagar" if escolha == "Contas a pagar" else "receber"
+    tipo = "pagar" if st.session_state.nx_visualizar == "Contas a pagar" else "receber"
     st.session_state.next_fin_lista = tipo
     opcoes = _opcoes_lancamento(tipo)
     st.session_state[f"nx_opcao_{tipo}"] = _status_conta(st.session_state.get(f"nx_opcao_{tipo}"), opcoes)
@@ -9026,20 +9061,6 @@ def painel_contas_next() -> None:
     if buscou:
         st.session_state.nx_busca_feita = True
         st.session_state.nx_busca_tipo = tipo
-    colunas = [
-        "Código",
-        "Duplicata",
-        "Data Vencto.",
-        "Nome/Razão Social",
-        "Histórico Lançamento",
-        "Data pagto.",
-        "Valor da dívida",
-        "Valor da Baixa",
-        "Pedido",
-    ]
-    if tipo == "receber":
-        colunas.insert(colunas.index("Data Vencto.") + 1, "Dias vencidos")
-        colunas.extend(["O.S. NeXT", "O.S. Oficina", "O. TOP"])
     buscar = bool(st.session_state.get("nx_busca_feita")) and st.session_state.get("nx_busca_tipo") == tipo
     frame = pd.DataFrame()
     if buscar:
@@ -9228,8 +9249,6 @@ def painel_contas_next() -> None:
                 conta = buscar_next(int(achado.iat[0, 0]))
                 quitado = conta is not None and str(conta["quitado"] or "").strip().casefold() == "sim"
                 abrir_baixa_next(int(achado.iat[0, 0]), False, quitado)
-    else:
-        mostrar_planilha(pd.DataFrame(columns=colunas), width="stretch", hide_index=True, height=180, alt="Lançamentos")
     _painel_operacao_contas(tipo)
     if st.session_state.get("fin_baixa_id"):
         dialogo_baixa()
