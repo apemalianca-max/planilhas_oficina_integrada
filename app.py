@@ -2701,7 +2701,7 @@ def conta_tem_baixa(linha: pd.Series) -> bool:
 def botoes_estorno(origem: str, conta_id: int, linha: pd.Series) -> None:
     if not conta_tem_baixa(linha):
         return
-    if not usuario_admin():
+    if not usuario_financeiro():
         st.caption("Somente o administrador pode estornar a baixa parcial ou completa.")
         return
     chave = f"{origem}_{int(conta_id)}"
@@ -2766,38 +2766,74 @@ def _linha_doc(rotulo: str, valor: str) -> str:
     return f"<tr><th>{html.escape(rotulo)}</th><td>{html.escape(valor or '—')}</td></tr>"
 
 
+def _eh_pagamento(dados: dict) -> bool:
+    return bool(dados.get("pagar"))
+
+
+def _titulo_quitacao(dados: dict) -> str:
+    return "COMPROVANTE DE PAGAMENTO" if _eh_pagamento(dados) else "RECIBO DE QUITAÇÃO"
+
+
+def _texto_quitacao(dados: dict) -> str:
+    pessoa = html.escape(dados["cliente"])
+    valor = html.escape(dados["valor_pago"])
+    extenso = html.escape(dados["extenso"])
+    descricao = html.escape(dados["descricao"])
+    documento = html.escape(dados["os"])
+    if _eh_pagamento(dados):
+        return (
+            f"Pagamos a <strong>{pessoa}</strong> a importância de "
+            f"<strong>{valor}</strong> ({extenso}), "
+            f"referente a {descricao}, documento nº {documento}."
+        )
+    return (
+        f"Recebemos de <strong>{pessoa}</strong> a importância de "
+        f"<strong>{valor}</strong> ({extenso}), "
+        f"referente a {descricao}, OS nº {documento}, "
+        "dando plena, rasa e irrevogável quitação do débito abaixo."
+    )
+
+
+def _tabela_quitacao(dados: dict) -> str:
+    pessoa = "Fornecedor" if _eh_pagamento(dados) else "Cliente"
+    numero = "Comprovante nº" if _eh_pagamento(dados) else "Recibo nº"
+    referencia = "Nº documento" if _eh_pagamento(dados) else "Nº OS"
+    return "".join(
+        [
+            _linha_doc(numero, dados["numero"]),
+            _linha_doc(pessoa, dados["cliente"]),
+            _linha_doc(referencia, dados["os"]),
+            _linha_doc("Descrição", dados["descricao"]),
+            _linha_doc("Parcela", dados["parcela"]),
+            _linha_doc("Vencimento", dados["vencimento"]),
+            _linha_doc("Valor da dívida", dados["divida"]),
+            _linha_doc("Juros", dados["juros"]),
+            _linha_doc("Multa", dados["multa"]),
+            _linha_doc("Valor pago", dados["valor_pago"]),
+            _linha_doc("Data do pagamento", dados["pagamento"]),
+            _linha_doc("Obs", dados["obs"]),
+        ]
+    )
+
+
 def html_recibo(dados: dict) -> str:
+    titulo = _titulo_quitacao(dados)
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<title>Recibo — {html.escape(TITULO)}</title>
+<title>{html.escape(titulo)} — {html.escape(TITULO)}</title>
 <style>{_estilo_documento()}</style>
 </head>
 <body>
-{_cabecalho_documento("RECIBO DE QUITAÇÃO")}
+{_cabecalho_documento(titulo)}
 <p class="texto">
-Recebemos de <strong>{html.escape(dados["cliente"])}</strong> a importância de
-<strong>{html.escape(dados["valor_pago"])}</strong>
-({html.escape(dados["extenso"])}),
-referente a {html.escape(dados["descricao"])}, OS nº {html.escape(dados["os"])},
-dando plena, rasa e irrevogável quitação do débito abaixo.
+{_texto_quitacao(dados)}
 </p>
 <table>
-{_linha_doc("Recibo nº", dados["numero"])}
-{_linha_doc("Cliente", dados["cliente"])}
-{_linha_doc("Nº OS", dados["os"])}
-{_linha_doc("Descrição", dados["descricao"])}
-{_linha_doc("Parcela", dados["parcela"])}
-{_linha_doc("Vencimento", dados["vencimento"])}
-{_linha_doc("Valor da dívida", dados["divida"])}
-{_linha_doc("Juros", dados["juros"])}
-{_linha_doc("Multa", dados["multa"])}
-{_linha_doc("Valor pago", dados["valor_pago"])}
-{_linha_doc("Data do pagamento", dados["pagamento"])}
-{_linha_doc("Obs", dados["obs"])}
+{_tabela_quitacao(dados)}
 </table>
-<p class="carimbo">QUITADO</p>
+<p class="carimbo">{"PAGO" if _eh_pagamento(dados) else "QUITADO"}</p>
 <p class="texto">{html.escape(ENDERECO_EMPRESA)}, {html.escape(dados["pagamento"])}.</p>
 <div class="assinatura">{html.escape(TITULO)}<br>CNPJ {html.escape(documento_empresa(CNPJ_NUMERO))}</div>
 </body>
@@ -2861,6 +2897,7 @@ def _dados_documento(linha: pd.Series, juros: float, multa: float, pago: float, 
         "pagamento": data_br(quando) or "—",
         "emissao": date.today().strftime("%d/%m/%Y"),
         "obs": obs.strip() or "—",
+        "pagar": str(linha.get("tipo", "")).strip().casefold() in {"pagar", "despesa"},
     }
 
 
@@ -2891,29 +2928,14 @@ def fragmento_recibo(dados: dict) -> str:
         .doc-baixa .carimbo {{ margin-top: 12px; font-family: Arial, sans-serif; font-weight: 700; color: #145c45; }}
       </style>
       <p class="empresa">{html.escape(TITULO.upper())}<br>CNPJ {cnpj}<br>{html.escape(ENDERECO_EMPRESA)}</p>
-      <h2>RECIBO DE QUITAÇÃO</h2>
+      <h2>{html.escape(_titulo_quitacao(dados))}</h2>
       <p class="texto">
-        Recebemos de <strong>{html.escape(dados["cliente"])}</strong> a importância de
-        <strong>{html.escape(dados["valor_pago"])}</strong>
-        ({html.escape(dados["extenso"])}),
-        referente a {html.escape(dados["descricao"])}, OS nº {html.escape(dados["os"])},
-        dando plena, rasa e irrevogável quitação do débito abaixo.
+        {_texto_quitacao(dados)}
       </p>
       <table>
-        {_linha_doc("Recibo nº", dados["numero"])}
-        {_linha_doc("Cliente", dados["cliente"])}
-        {_linha_doc("Nº OS", dados["os"])}
-        {_linha_doc("Descrição", dados["descricao"])}
-        {_linha_doc("Parcela", dados["parcela"])}
-        {_linha_doc("Vencimento", dados["vencimento"])}
-        {_linha_doc("Valor da dívida", dados["divida"])}
-        {_linha_doc("Juros", dados["juros"])}
-        {_linha_doc("Multa", dados["multa"])}
-        {_linha_doc("Valor pago", dados["valor_pago"])}
-        {_linha_doc("Data do pagamento", dados["pagamento"])}
-        {_linha_doc("Obs", dados["obs"])}
+        {_tabela_quitacao(dados)}
       </table>
-      <p class="carimbo">QUITADO</p>
+      <p class="carimbo">{"PAGO" if _eh_pagamento(dados) else "QUITADO"}</p>
       <p class="texto">{html.escape(ENDERECO_EMPRESA)}, {html.escape(dados["pagamento"])}.</p>
     </div>
     """
@@ -2932,6 +2954,10 @@ def mostrar_documento_baixa(linha: pd.Series, chave: str) -> None:
     valor_nota = restante if restante > 0 else devido
     dados_nota["valor"] = brl(valor_nota)
     dados_nota["extenso"] = reais_por_extenso(valor_nota)
+    if dados.get("pagar"):
+        if st.button("Imprimir comprovante de pagamento", width="stretch", key=f"{chave}_recibo"):
+            disparar_impressao(html_recibo(dados))
+        return
     i1, i2 = st.columns(2)
     if i1.button("Imprimir recibo quitado", width="stretch", key=f"{chave}_recibo"):
         disparar_impressao(html_recibo(dados))
@@ -3158,11 +3184,20 @@ def dialogo_baixa() -> None:
     valor_nota = restante if restante > 0 else devido
     dados_nota["valor"] = brl(valor_nota)
     dados_nota["extenso"] = reais_por_extenso(valor_nota)
-    i1, i2 = st.columns(2)
-    if i1.button("Imprimir recibo quitado", width="stretch", key=f"bx_recibo_{conta_id}", disabled=not pode_quitar):
-        disparar_impressao(html_recibo(dados))
-    if i2.button("Imprimir nota promissória", width="stretch", key=f"bx_nota_{conta_id}"):
-        disparar_impressao(html_promissoria(dados_nota))
+    if dados.get("pagar"):
+        if st.button(
+            "Imprimir comprovante de pagamento",
+            width="stretch",
+            key=f"bx_recibo_{conta_id}",
+            disabled=not pode_quitar,
+        ):
+            disparar_impressao(html_recibo(dados))
+    else:
+        i1, i2 = st.columns(2)
+        if i1.button("Imprimir recibo quitado", width="stretch", key=f"bx_recibo_{conta_id}", disabled=not pode_quitar):
+            disparar_impressao(html_recibo(dados))
+        if i2.button("Imprimir nota promissória", width="stretch", key=f"bx_nota_{conta_id}"):
+            disparar_impressao(html_promissoria(dados_nota))
 
 
 def _celula_dias(dias: int | None) -> None:
@@ -8361,7 +8396,7 @@ def _ficha_next(linha: pd.Series, dias: int | None, *, mostrar_baixa: bool = Fal
     multa = valor_banco(linha.get("multa"))
     valor = valor_banco(linha["valor"])
     pares = [
-        ("Cliente", texto_limpo(linha["nome"]) or "—"),
+        ("Fornecedor" if _conta_a_pagar(linha) else "Cliente", texto_limpo(linha["nome"]) or "—"),
         ("Código", texto_limpo(linha["codigo"]) or "—"),
         ("Descrição", texto_limpo(linha["descricao"]) or "—"),
         ("Parcela", texto_limpo(linha["parcela"]) or "—"),
@@ -8524,11 +8559,20 @@ def dialogo_baixa_next() -> None:
     valor_nota = restante if restante > 0 else devido
     dados_nota["valor"] = brl(valor_nota)
     dados_nota["extenso"] = reais_por_extenso(valor_nota)
-    i1, i2 = st.columns(2)
-    if i1.button("Imprimir recibo quitado", width="stretch", key=f"nx_recibo_{conta_id}", disabled=not pode_quitar):
-        disparar_impressao(html_recibo(dados))
-    if i2.button("Imprimir nota promissória", width="stretch", key=f"nx_nota_{conta_id}"):
-        disparar_impressao(html_promissoria(dados_nota))
+    if dados.get("pagar"):
+        if st.button(
+            "Imprimir comprovante de pagamento",
+            width="stretch",
+            key=f"nx_recibo_{conta_id}",
+            disabled=not pode_quitar,
+        ):
+            disparar_impressao(html_recibo(dados))
+    else:
+        i1, i2 = st.columns(2)
+        if i1.button("Imprimir recibo quitado", width="stretch", key=f"nx_recibo_{conta_id}", disabled=not pode_quitar):
+            disparar_impressao(html_recibo(dados))
+        if i2.button("Imprimir nota promissória", width="stretch", key=f"nx_nota_{conta_id}"):
+            disparar_impressao(html_promissoria(dados_nota))
 
 
 def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False) -> None:
@@ -10028,6 +10072,14 @@ def usuario_admin() -> bool:
     return bool(usuario.get("administrador"))
 
 
+def usuario_financeiro() -> bool:
+    if usuario_admin():
+        return True
+    usuario = st.session_state.get("usuario") or {}
+    texto = sem_acento(f"{usuario.get('nome') or ''} {usuario.get('login') or ''}")
+    return "maria" in texto
+
+
 def _chave_widget(texto: str) -> str:
     return "".join(caractere if caractere.isalnum() else "_" for caractere in str(texto))
 
@@ -10104,6 +10156,8 @@ _ESCOPOS_BAIXA = {"baixa_oficina", "baixa_next", "editor_baixa"}
 def indagar_edicao(escopo: str, registro: str, titulo: str) -> bool:
     marca = f"{escopo}:{registro}"
     seguro = _chave_widget(marca)
+    if escopo in _ESCOPOS_BAIXA and usuario_financeiro() and not usuario_admin():
+        return True
     if not usuario_admin() and escopo not in _ESCOPOS_BAIXA:
         st.caption("Somente o administrador pode editar os campos deste painel.")
         return False
