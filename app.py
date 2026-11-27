@@ -286,6 +286,29 @@ def _parece_placa(texto: str) -> bool:
     return len(compacto) >= 5 and any(c.isalpha() for c in compacto) and any(c.isdigit() for c in compacto)
 
 
+_RE_VALOR = re.compile(
+    r"r\$\s*\d{1,3}(?:\.\d{3})+,\d{1,2}"
+    r"|r\$\s*\d+,\d{1,2}"
+    r"|r\$\s*\d+\.\d{1,2}"
+    r"|\d{1,3}(?:\.\d{3})+,\d{1,2}"
+    r"|\d+,\d{1,2}"
+    r"|\d+\.\d{1,2}"
+)
+
+
+def _valor_busca(texto: str) -> float | None:
+    limpo = re.sub(r"\s+", "", sem_acento(texto).replace("r$", ""))
+    if not limpo:
+        return None
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+,\d{1,2}", limpo) or re.fullmatch(r"\d+,\d{1,2}", limpo):
+        return round(float(limpo.replace(".", "").replace(",", ".")), 2)
+    if re.fullmatch(r"\d+\.\d{1,2}", limpo):
+        return round(float(limpo), 2)
+    if re.fullmatch(r"\d+", limpo):
+        return float(limpo)
+    return None
+
+
 def contem_termo(serie: pd.Series, termo: str) -> pd.Series:
     alvo = sem_acento(termo.strip())
     if not alvo:
@@ -6015,6 +6038,14 @@ def pedidos_do_termo(termo: str) -> list[str]:
 
 
 def clausula_documento_financeiro(termo: str, params: list) -> str:
+    if re.search(r"\d[,.]\d", sem_acento(termo)):
+        valor_decimal = _valor_busca(termo)
+        if valor_decimal is not None:
+            partes = [comparar_busca(campo) for campo in ("codigo", "duplicata", "nome", "historico", "obs_conta")]
+            params.extend(like(termo.strip()) for _ in partes)
+            partes.append("ABS(COALESCE(valor_liquido, 0) - ?) < 0.005")
+            params.append(valor_decimal)
+            return "(" + " OR ".join(partes) + ")"
     termos = termos_busca(termo)
     if not termos:
         return ""
@@ -6040,6 +6071,10 @@ def clausula_documento_financeiro(termo: str, params: list) -> str:
             params.append(numero)
             partes.append("ltrim(split_part(COALESCE(duplicata, ''), '/', 1), '0') = ?")
             params.append(numero)
+        valor = _valor_busca(item)
+        if valor is not None:
+            partes.append("ABS(COALESCE(valor_liquido, 0) - ?) < 0.005")
+            params.append(valor)
     if pedidos:
         partes.append(f"{_PEDIDO_NO_HISTORICO} IN ({', '.join('?' for _ in pedidos)})")
         params.extend(pedidos)
@@ -8724,6 +8759,8 @@ def _termos_combinados(texto: str) -> list[str]:
     extra += re.findall(r"\b(?:os|pedido|ped|orcamento|orc|nf|nfe|nro)(\d+)\b", bruto)
     bruto = re.sub(r"\b(?:os|pedido|ped|orcamento|orc|placa|nf|nfe|nro)\s*[:.]?\s*(?=\d)", " ", bruto)
     bruto = re.sub(r"\b(?:os|pedido|ped|orcamento|orc|nf|nfe|nro)(?=\d)", " ", bruto)
+    valores = _RE_VALOR.findall(bruto)
+    bruto = _RE_VALOR.sub(" ", bruto)
     pedacos: list[str] = []
     for parte in re.split(r"[\s,]+", bruto):
         parte = parte.strip(" .:-#")
@@ -8736,6 +8773,7 @@ def _termos_combinados(texto: str) -> list[str]:
             pedacos.extend(parte.split("/"))
             continue
         pedacos.append(parte)
+    pedacos.extend(valores)
     pedacos.extend(extra)
     termos: list[str] = []
     for parte in pedacos:
@@ -8978,7 +9016,7 @@ def _painel_operacao_contas(tipo: str) -> None:
     f1, f2, f3 = st.columns([2, 1, 1])
     texto = f1.text_input(
         "Pesquisar",
-        placeholder="Código, nome, nota, histórico ou observação. Pode combinar.",
+        placeholder="Código, nome, nota, histórico, observação ou valor. Pode combinar.",
         key="busca_next_fin",
         persist_state="session",
     )
@@ -9170,9 +9208,9 @@ def painel_contas_next() -> None:
                 "Buscar",
                 key="nx_pessoa",
                 placeholder=(
-                    "Fornecedor, nota e histórico. Pode combinar."
+                    "Fornecedor, nota, histórico ou valor. Pode combinar."
                     if tipo == "pagar"
-                    else "Cliente, placa, O.S. e pedido. Pode combinar."
+                    else "Cliente, placa, O.S., pedido ou valor. Pode combinar."
                 ),
             )
             status.selectbox(
@@ -9190,9 +9228,9 @@ def painel_contas_next() -> None:
             buscou = buscar.form_submit_button("Buscar", type="primary", width="stretch")
             limpar.form_submit_button("Limpar", width="stretch", on_click=_limpar_busca_contas)
         st.caption(
-            "Combine fornecedor, número da nota e termos do histórico. Também combina com vencimento, baixa e status."
+            "Combine fornecedor, número da nota, termos do histórico e valor da dívida. Também combina com vencimento, baixa e status."
             if tipo == "pagar"
-            else "Combine cliente, placa, número da O.S., do pedido e do orçamento, serviço ou mecânico. "
+            else "Combine cliente, placa, número da O.S., do pedido e do orçamento, serviço, mecânico e valor da dívida. "
             "Também combina com vencimento, baixa e status."
         )
     if buscou:
