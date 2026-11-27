@@ -1118,6 +1118,40 @@ def ordenar_contas_receber(
     return saida.sort_values(["_grupo", "_posicao"], kind="mergesort").drop(columns=["_grupo", "_posicao"])
 
 
+def ordenar_busca_lancamento(
+    frame: pd.DataFrame,
+    em_aberto: list[bool] | None = None,
+) -> pd.DataFrame:
+    if frame.empty or "vencimento" not in frame.columns:
+        return frame
+    hoje = date.today()
+    if em_aberto is None:
+        em_aberto = [str(valor or "").strip().casefold() != "sim" for valor in frame["quitado"]]
+    pagamentos = frame["data_pagamento"] if "data_pagamento" in frame.columns else [None] * len(frame)
+    identificadores = frame["id"] if "id" in frame.columns else [0] * len(frame)
+    chaves = []
+    for vencimento, pagamento, aberto, identificador in zip(
+        frame["vencimento"], pagamentos, em_aberto, identificadores, strict=True
+    ):
+        quando = data_iso(vencimento)
+        vencido = bool(aberto) and quando is not None and (hoje - quando).days > 0
+        referencia = quando or data_iso(pagamento)
+        recente = -referencia.toordinal() if referencia is not None else 10**12
+        try:
+            recente_id = -int(identificador)
+        except (TypeError, ValueError):
+            recente_id = 0
+        chaves.append((0 if vencido else 1, recente, recente_id))
+    ordem = pd.DataFrame(chaves, index=frame.index, columns=["_grupo", "_recente", "_id"])
+    saida = frame.copy()
+    saida["_grupo"] = ordem["_grupo"]
+    saida["_recente"] = ordem["_recente"]
+    saida["_id"] = ordem["_id"]
+    return saida.sort_values(["_grupo", "_recente", "_id"], kind="mergesort").drop(
+        columns=["_grupo", "_recente", "_id"]
+    )
+
+
 def _dias_celula(valor) -> int | None:
     if valor is None or valor is pd.NA:
         return None
@@ -9108,9 +9142,9 @@ def painel_contas_next() -> None:
                     frame["quitado"], os_oficina_ordem, os_next_ordem, strict=True
                 )
             ]
-            frame = ordenar_contas_receber(
-                frame, manter_aberto=frame["_aberto_vinculo"].tolist()
-            )
+        if not frame.empty:
+            abertos = frame["_aberto_vinculo"].tolist() if "_aberto_vinculo" in frame.columns else None
+            frame = ordenar_busca_lancamento(frame, abertos)
         pago = pd.to_numeric(frame["valor_pago"], errors="coerce").fillna(0)
         baixa_planilha = pd.to_numeric(frame["valor_baixa"], errors="coerce").fillna(0)
         divida = pd.to_numeric(frame["valor_liquido"], errors="coerce").fillna(0)
@@ -9171,8 +9205,8 @@ def painel_contas_next() -> None:
                 "Nas contas em aberto, o valor da dívida é o total das vendas menos o desconto e menos o pagamento parcial. "
                 "Quem não pagou nada fica com o líquido do pedido. A diferença lançada como juros foi retirada. "
                 "O botão de juros calcula esse acréscimo de novo. "
-                "No topo ficam, por 3 dias, as que acabaram de vencer, da mais recente para a mais antiga. "
-                "Depois vêm as vencidas há mais tempo. O número de dias fica em destaque."
+                "Os vencidos ficam no topo. Em seguida, a lista vai da data mais recente para a mais antiga. "
+                "O número de dias fica em destaque."
                 if tipo == "receber"
                 else ""
             )
