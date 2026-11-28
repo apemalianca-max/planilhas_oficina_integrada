@@ -6140,8 +6140,12 @@ def _pedir_exclusao_pagar(chave_ids: str, chave_click: str) -> None:
         return
     try:
         indice = click.row
+        rotulo = click.label
     except AttributeError:
         indice = click["row"]
+        rotulo = click.get("label")
+    if str(rotulo or "").strip() != "Excluir":
+        return
     if not isinstance(indice, int) or not 0 <= indice < len(ids):
         return
     st.session_state.nx_excluir_id = int(ids[indice])
@@ -8098,7 +8102,7 @@ def _apagar_conta_pagar(conta_id: int) -> None:
     if not usuario_admin():
         return
     linha = buscar_next(int(conta_id))
-    if linha is None or not _conta_a_pagar(linha):
+    if linha is None or not _conta_a_pagar(linha) or not _conta_em_aberto(linha):
         return
     codigo = texto_limpo(linha.get("codigo")) or str(int(conta_id))
     nome = texto_limpo(linha.get("nome")) or "sem nome"
@@ -8120,8 +8124,12 @@ def _apagar_conta_pagar(conta_id: int) -> None:
     st.session_state.next_baixa_aviso_texto = f"Documento {codigo} excluído."
 
 
+def _conta_em_aberto(linha) -> bool:
+    return str(linha.get("quitado", "")).strip().casefold() != "sim"
+
+
 def _excluir_no_documento(conta_id: int, linha) -> None:
-    if not usuario_admin() or not _conta_a_pagar(linha):
+    if not usuario_admin() or not _conta_a_pagar(linha) or not _conta_em_aberto(linha):
         return
     if st.session_state.get("nx_excluir_doc") == int(conta_id):
         st.warning(
@@ -8154,9 +8162,9 @@ def dialogo_excluir_pagar() -> None:
     if not conta_id:
         return
     linha = buscar_next(int(conta_id))
-    if linha is None or not _conta_a_pagar(linha):
+    if linha is None or not _conta_a_pagar(linha) or not _conta_em_aberto(linha):
         st.session_state.nx_excluir_id = None
-        st.warning("Este documento não é uma conta a pagar.")
+        st.warning("Só é possível excluir um documento de contas a pagar que ainda está em aberto.")
         return
     codigo = texto_limpo(linha.get("codigo")) or "—"
     nome = texto_limpo(linha.get("nome")) or "—"
@@ -8589,9 +8597,16 @@ def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False, exc
             st.session_state.nx_ids_todas = ids_exclusao
         trabalho = frame.drop(columns=["id"])
     visivel = format_frame(com_dias_vencidos(trabalho))
-    if ids_exclusao is not None:
-        visivel = visivel.copy()
-        visivel["Excluir"] = ["Excluir"] * len(visivel)
+    if ids_exclusao is not None and "quitado" in frame.columns:
+        rotulos = [
+            "Excluir" if str(valor or "").strip().casefold() != "sim" else None
+            for valor in frame["quitado"].tolist()
+        ]
+        if any(rotulos):
+            visivel = visivel.copy()
+            visivel["Excluir"] = rotulos
+        else:
+            ids_exclusao = None
     config = column_config(list(visivel.columns))
     if ids_exclusao is not None:
         config["Excluir"] = st.column_config.ButtonColumn(
@@ -9018,7 +9033,7 @@ def _painel_operacao_contas(tipo: str) -> None:
         r1, r2 = st.columns(2)
         r1.metric("Documentos baixados", inteiro(len(recentes)))
         r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
-        listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber", mostrar_excluir=tipo == "pagar")
+        listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber")
     st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
     st.subheader("Todas as contas")
     if tipo == "receber":
@@ -9345,7 +9360,9 @@ def painel_contas_next() -> None:
             grade["O. TOP"] = os_top
         grade["Documento"] = ["Ver documento" if flag else "Baixar" for flag in quitado_flag]
         if tipo == "pagar" and usuario_admin():
-            grade["Excluir"] = ["Excluir"] * len(frame)
+            rotulos_excluir = [None if flag else "Excluir" for flag in quitado_flag]
+            if any(rotulos_excluir):
+                grade["Excluir"] = rotulos_excluir
         visivel = pd.DataFrame(grade)
         st.caption(
             "Valor da dívida é o valor do lançamento. Valor da Baixa é o valor pago neste painel. "
