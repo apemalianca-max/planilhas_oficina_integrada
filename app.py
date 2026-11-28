@@ -6131,6 +6131,35 @@ def click_reabrir_next() -> None:
     _baixa_pela_linha("nx_ids_recentes", "nx_click_reabrir", True)
 
 
+def _pedir_exclusao_pagar(chave_ids: str, chave_click: str) -> None:
+    if not usuario_admin():
+        return
+    click = st.session_state.get(chave_click)
+    ids = list(st.session_state.get(chave_ids) or [])
+    if click is None:
+        return
+    try:
+        indice = click.row
+    except AttributeError:
+        indice = click["row"]
+    if not isinstance(indice, int) or not 0 <= indice < len(ids):
+        return
+    st.session_state.nx_excluir_id = int(ids[indice])
+    st.session_state.nx_excluir_doc = None
+    st.session_state.next_baixa_id = None
+    st.session_state.next_baixa_ver = False
+    st.session_state.next_baixa_reabrir = False
+    st.session_state.fin_baixa_id = None
+    st.session_state.nx_baixa_docs = None
+
+
+def _clique_excluir_pagar(chave_ids: str, chave_click: str):
+    def acao() -> None:
+        _pedir_exclusao_pagar(chave_ids, chave_click)
+
+    return acao
+
+
 def click_abrir_busca_conta() -> None:
     _baixa_pela_linha("nx_ids_busca", "nx_click_busca", False)
 
@@ -7796,6 +7825,7 @@ def listar_next_abertas(
     vermelho: bool = False,
     mostrar_dias: bool = True,
     mostrar_vinculo: bool = False,
+    mostrar_excluir: bool = False,
 ) -> None:
     st.session_state[chave_ids] = [int(valor) for valor in contas["id"].tolist()]
     chave_pedido = f"{chave_ids}_pedidos"
@@ -7856,8 +7886,10 @@ def listar_next_abertas(
                 "O. TOP": links_os_top(os_top),
                 "Baixar": colunas["Baixar"],
             }
+    if mostrar_excluir and usuario_admin():
+        colunas["Excluir"] = ["Excluir"] * len(contas)
     visivel = pd.DataFrame(colunas)
-    exceto = {"Baixar", "Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP"}
+    exceto = {"Baixar", "Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Excluir"}
     if mostrar_dias and "Dias vencidos" in visivel.columns:
         tabela = pintar_dias_vencidos(visivel, "Dias vencidos", exceto, VERMELHO if vermelho else "")
     elif vermelho:
@@ -7884,6 +7916,14 @@ def listar_next_abertas(
             key=chave_click,
         ),
     }
+    if mostrar_excluir and usuario_admin() and "Excluir" in visivel.columns:
+        config["Excluir"] = st.column_config.ButtonColumn(
+            "Excluir",
+            width="small",
+            help="Exclui este documento de contas a pagar. Somente o administrador.",
+            on_click=_clique_excluir_pagar(chave_ids, f"{chave_ids}_excluir"),
+            key=f"{chave_ids}_excluir",
+        )
     if mostrar_vinculo:
         config["O.S. NeXT"] = st.column_config.ButtonColumn(
             "O.S. NeXT",
@@ -7938,10 +7978,11 @@ def listar_pagar_a_vencer_por_mes(contas: pd.DataFrame, total_lista) -> None:
                 ao_clicar=_clique_baixa_next(f"nx_ids_pagar_{chave}", f"nx_click_pagar_{chave}"),
                 alt=f"Contas a pagar a vencer em {titulo}",
                 mostrar_dias=False,
+                mostrar_excluir=True,
             )
 
 
-def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False) -> None:
+def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False, mostrar_excluir: bool = False) -> None:
     st.session_state.nx_ids_recentes = [int(valor) for valor in contas["id"].tolist()]
     pedidos = [numero_pedido_texto(valor) for valor in contas["descricao"].tolist()]
     st.session_state.nx_pedidos_recentes = pedidos
@@ -7972,6 +8013,8 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             "Ver documento": colunas["Ver documento"],
             "Reabrir baixa": colunas["Reabrir baixa"],
         }
+    if mostrar_excluir and usuario_admin():
+        colunas["Excluir"] = ["Excluir"] * len(contas)
     visivel = pd.DataFrame(colunas)
     config = {
         "Código": st.column_config.TextColumn("Código", width="small"),
@@ -7999,6 +8042,14 @@ def listar_next_recentes(contas: pd.DataFrame, *, mostrar_vinculo: bool = False)
             key="nx_click_reabrir",
         ),
     }
+    if mostrar_excluir and usuario_admin() and "Excluir" in visivel.columns:
+        config["Excluir"] = st.column_config.ButtonColumn(
+            "Excluir",
+            width="small",
+            help="Exclui este documento de contas a pagar. Somente o administrador.",
+            on_click=_clique_excluir_pagar("nx_ids_recentes", "nx_click_excluir_recentes"),
+            key="nx_click_excluir_recentes",
+        )
     if mostrar_vinculo:
         config["O.S. NeXT"] = st.column_config.ButtonColumn(
             "O.S. NeXT",
@@ -8040,6 +8091,85 @@ def fechar_baixa_next() -> None:
     st.session_state.next_baixa_reabrir = False
     st.session_state.next_baixa_ver = False
     st.session_state.baixa_estorno = None
+    st.session_state.nx_excluir_doc = None
+
+
+def _apagar_conta_pagar(conta_id: int) -> None:
+    if not usuario_admin():
+        return
+    linha = buscar_next(int(conta_id))
+    if linha is None or not _conta_a_pagar(linha):
+        return
+    codigo = texto_limpo(linha.get("codigo")) or str(int(conta_id))
+    nome = texto_limpo(linha.get("nome")) or "sem nome"
+    with engine().begin() as conn:
+        conn.execute(
+            text("DELETE FROM next_lancamento WHERE id = :id AND tipo = 'pagar'"),
+            {"id": int(conta_id)},
+        )
+        registrar_log(
+            "excluir",
+            f"Excluiu conta a pagar {codigo} de {nome} (id {int(conta_id)})",
+            modulo="NeXT",
+            conn=conn,
+        )
+    st.cache_data.clear()
+    st.session_state.nx_excluir_id = None
+    fechar_baixa_next()
+    st.session_state.next_baixa_aviso = 1
+    st.session_state.next_baixa_aviso_texto = f"Documento {codigo} excluído."
+
+
+def _excluir_no_documento(conta_id: int, linha) -> None:
+    if not usuario_admin() or not _conta_a_pagar(linha):
+        return
+    if st.session_state.get("nx_excluir_doc") == int(conta_id):
+        st.warning(
+            "Excluir este documento de contas a pagar? Essa exclusão não volta.",
+            title="Confirmar exclusão",
+        )
+        confirmar, cancelar = st.columns(2)
+        if confirmar.button("Confirmar exclusão", type="primary", width="stretch", key=f"nx_ok_exc_{conta_id}"):
+            _apagar_conta_pagar(int(conta_id))
+            st.rerun()
+        if cancelar.button("Cancelar", width="stretch", key=f"nx_no_exc_{conta_id}"):
+            st.session_state.nx_excluir_doc = None
+            st.rerun()
+        return
+    if st.button("Excluir", width="stretch", key=f"nx_exc_doc_{conta_id}"):
+        st.session_state.nx_excluir_doc = int(conta_id)
+        st.rerun()
+
+
+def fechar_exclusao_pagar() -> None:
+    st.session_state.nx_excluir_id = None
+
+
+@st.dialog("Excluir documento", width="small", on_dismiss=fechar_exclusao_pagar)
+def dialogo_excluir_pagar() -> None:
+    if not usuario_admin():
+        st.session_state.nx_excluir_id = None
+        return
+    conta_id = st.session_state.get("nx_excluir_id")
+    if not conta_id:
+        return
+    linha = buscar_next(int(conta_id))
+    if linha is None or not _conta_a_pagar(linha):
+        st.session_state.nx_excluir_id = None
+        st.warning("Este documento não é uma conta a pagar.")
+        return
+    codigo = texto_limpo(linha.get("codigo")) or "—"
+    nome = texto_limpo(linha.get("nome")) or "—"
+    st.warning(
+        f"Excluir o documento {codigo} de {nome}, no valor de {brl(linha.get('valor'))}? Essa exclusão não volta.",
+        title="Confirmar exclusão",
+    )
+    if st.button("Confirmar exclusão", type="primary", width="stretch", key="nx_confirmar_excluir"):
+        _apagar_conta_pagar(int(conta_id))
+        st.rerun()
+    if st.button("Cancelar", width="stretch", key="nx_cancelar_excluir"):
+        st.session_state.nx_excluir_id = None
+        st.rerun()
 
 
 def buscar_next(conta_id: int) -> pd.Series | None:
@@ -8326,7 +8456,9 @@ def dialogo_baixa_next() -> None:
             st.session_state.next_baixa_reabrir = True
             st.session_state.next_baixa_ver = False
             st.session_state.next_baixa_init = None
+            st.session_state.nx_excluir_doc = None
             st.rerun()
+        _excluir_no_documento(int(conta_id), linha)
         return
     if reabrir:
         st.subheader("Reabrir baixa")
@@ -8442,18 +8574,37 @@ def dialogo_baixa_next() -> None:
             disparar_impressao(html_recibo(dados))
         if i2.button("Imprimir nota promissória", width="stretch", key=f"nx_nota_{conta_id}"):
             disparar_impressao(html_promissoria(dados_nota))
+    _excluir_no_documento(int(conta_id), linha)
 
 
-def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False) -> None:
+def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False, excluir: bool = False) -> None:
     if frame.empty:
         st.info("Nenhuma conta encontrada com esses filtros.")
         return
-    visivel = format_frame(com_dias_vencidos(frame))
+    trabalho = frame
+    ids_exclusao: list[int] | None = None
+    if "id" in frame.columns:
+        if excluir and usuario_admin():
+            ids_exclusao = [int(valor) for valor in frame["id"].tolist()]
+            st.session_state.nx_ids_todas = ids_exclusao
+        trabalho = frame.drop(columns=["id"])
+    visivel = format_frame(com_dias_vencidos(trabalho))
+    if ids_exclusao is not None:
+        visivel = visivel.copy()
+        visivel["Excluir"] = ["Excluir"] * len(visivel)
     config = column_config(list(visivel.columns))
+    if ids_exclusao is not None:
+        config["Excluir"] = st.column_config.ButtonColumn(
+            "Excluir",
+            width="small",
+            help="Exclui este documento de contas a pagar. Somente o administrador.",
+            on_click=_clique_excluir_pagar("nx_ids_todas", "nx_click_excluir_todas"),
+            key="nx_click_excluir_todas",
+        )
     if destacar_dias and "dias_vencidos" in visivel.columns:
-        tabela = pintar_dias_vencidos(visivel, "dias_vencidos", faixa=VERMELHO)
+        tabela = pintar_dias_vencidos(visivel, "dias_vencidos", {"Excluir"}, VERMELHO)
     elif "quitado" in visivel.columns:
-        tabela = pintar_nao_pagas(visivel)
+        tabela = pintar_nao_pagas(visivel, {"Excluir"})
     else:
         tabela = visivel
     mostrar_planilha(
@@ -8466,7 +8617,7 @@ def tabela_next(frame: pd.DataFrame, tipo: str, destacar_dias: bool = False) -> 
     )
     st.download_button(
         "Baixar CSV deste resultado",
-        data=visivel.to_csv(index=False).encode("utf-8-sig"),
+        data=visivel.drop(columns=["Excluir"], errors="ignore").to_csv(index=False).encode("utf-8-sig"),
         file_name=f"next_{tipo}.csv",
         mime="text/csv",
         key=f"download_next_{tipo}",
@@ -8825,6 +8976,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 alt="Contas vencidas do Next",
                 vermelho=True,
                 mostrar_vinculo=tipo == "receber",
+                mostrar_excluir=tipo == "pagar",
             )
     with coluna_avencer:
         st.html('<div id="next-avencer" style="scroll-margin-top:80px"></div>')
@@ -8852,6 +9004,7 @@ def _painel_operacao_contas(tipo: str) -> None:
                 ao_clicar=click_baixar_avencer,
                 alt="Contas a vencer do Next",
                 mostrar_vinculo=tipo == "receber",
+                mostrar_excluir=tipo == "pagar",
             )
     st.html('<div id="next-recentes" style="scroll-margin-top:80px"></div>')
     st.subheader("Documentos baixados")
@@ -8865,7 +9018,7 @@ def _painel_operacao_contas(tipo: str) -> None:
         r1, r2 = st.columns(2)
         r1.metric("Documentos baixados", inteiro(len(recentes)))
         r2.metric("Valor dessas baixas", brl(recentes["valor_pago"].sum()))
-        listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber")
+        listar_next_recentes(recentes, mostrar_vinculo=tipo == "receber", mostrar_excluir=tipo == "pagar")
     st.html('<div id="next-todas" style="scroll-margin-top:80px"></div>')
     st.subheader("Todas as contas")
     if tipo == "receber":
@@ -8977,7 +9130,7 @@ def _painel_operacao_contas(tipo: str) -> None:
         params_ordem = [limite_recente, limite_recente]
     frame = query(
         f"""
-        SELECT codigo, {descricao_sql} AS descricao, duplicata, vencimento, quitado,
+        SELECT id, codigo, {descricao_sql} AS descricao, duplicata, vencimento, quitado,
                valor_liquido AS valor, COALESCE(valor_pago, 0) AS valor_pago,
                data_pagamento AS dt_pagamento
         FROM next_lancamento{where}
@@ -8992,7 +9145,7 @@ def _painel_operacao_contas(tipo: str) -> None:
     m3.metric("Valor baixado", brl(totais.iat[0, 2]))
     if tipo == "receber" and not frame.empty:
         frame = ordenar_contas_receber(frame)
-    tabela_next(frame, "fin", destacar_dias=tipo == "receber")
+    tabela_next(frame, "fin", destacar_dias=tipo == "receber", excluir=tipo == "pagar")
 
 
 @st.dialog("O. TOP", width="small", on_dismiss=fechar_os_top)
@@ -9191,6 +9344,8 @@ def painel_contas_next() -> None:
             grade["O.S. Oficina"] = com_aberto(os_oficina, mapa_aberto_os_oficina(os_oficina))
             grade["O. TOP"] = os_top
         grade["Documento"] = ["Ver documento" if flag else "Baixar" for flag in quitado_flag]
+        if tipo == "pagar" and usuario_admin():
+            grade["Excluir"] = ["Excluir"] * len(frame)
         visivel = pd.DataFrame(grade)
         st.caption(
             "Valor da dívida é o valor do lançamento. Valor da Baixa é o valor pago neste painel. "
@@ -9222,7 +9377,7 @@ def painel_contas_next() -> None:
             tabela = pintar_dias_vencidos(
                 tabela,
                 "Dias vencidos",
-                {"Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Documento"},
+                {"Pedido", "O.S. NeXT", "O.S. Oficina", "O. TOP", "Documento", "Excluir"},
                 VERMELHO,
             )
         mostrar_planilha(
@@ -9270,6 +9425,13 @@ def painel_contas_next() -> None:
                     on_click=click_lancamento_grade,
                     key="nx_click_lancamento",
                 ),
+                "Excluir": st.column_config.ButtonColumn(
+                    "Excluir",
+                    width="small",
+                    help="Exclui este documento de contas a pagar. Somente o administrador.",
+                    on_click=_clique_excluir_pagar("nx_ids_lancamento", "nx_click_excluir_lancamento"),
+                    key="nx_click_excluir_lancamento",
+                ),
             },
             alt="Lançamentos a pagar e receber",
         )
@@ -9306,7 +9468,11 @@ def painel_contas_next() -> None:
                 quitado = conta is not None and str(conta["quitado"] or "").strip().casefold() == "sim"
                 abrir_baixa_next(int(achado.iat[0, 0]), False, quitado)
     _painel_operacao_contas(tipo)
-    if st.session_state.get("fin_baixa_id"):
+    if st.session_state.get("nx_excluir_id") and not usuario_admin():
+        st.session_state.nx_excluir_id = None
+    if st.session_state.get("nx_excluir_id"):
+        dialogo_excluir_pagar()
+    elif st.session_state.get("fin_baixa_id"):
         dialogo_baixa()
     elif st.session_state.get("next_baixa_id"):
         dialogo_baixa_next()
